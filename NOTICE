@@ -1,0 +1,19 @@
+tb-clawd — a Clawd companion for the Pock Touch Bar
+
+The MIT license in LICENSE covers this project's original source code,
+code-drawn artwork, documentation, rendering and animation implementation.
+The widget was originally developed within the claudefm community project.
+The original copyright notice is preserved in LICENSE.
+
+Claude, Clawd and their associated branding and character design belong to
+Anthropic. This is an independent community project, not an official Anthropic
+product, and is not affiliated with or endorsed by Anthropic. The code-drawn
+mascot is an original adaptation; official image or animation assets are not
+bundled or redistributed.
+
+Visual reference: Claude Code's storefront mascot
+https://www.stickermule.com/claudecode/item/19156131
+
+Pock and PockKit are separate projects. The widget uses Pock's public PKWidget
+protocol interface. See THIRD_PARTY_NOTICES.md for attribution and the MIT
+license covering that interface. No PockKit framework is redistributed.
