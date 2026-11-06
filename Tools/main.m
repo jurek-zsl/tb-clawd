@@ -3,6 +3,8 @@
 #import <dlfcn.h>
 #import "ClawdView.h"
 
+static const double CWLiveSleepAfterForTests = 5*60;
+
 static void Require(BOOL condition, NSString *message) {
     if (!condition) { fprintf(stderr, "FAIL: %s\n", message.UTF8String); exit(1); }
 }
@@ -92,11 +94,208 @@ static void CheckTouchDelivery(Class viewClass) {
     Require([mouseOnly sceneAtTime:1 width:176].activity==CWActivityMad,@"mouse-only preview path reacts");
 }
 
+// ---------------------------------------------------------------- live ---
+
+static NSString *CWTempClaudeDirectory(void) {
+    NSString *dir=[NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"clawd-live-%d-%u",getpid(),arc4random()]];
+    [NSFileManager.defaultManager createDirectoryAtPath:[dir stringByAppendingPathComponent:@"sessions"] withIntermediateDirectories:YES attributes:nil error:NULL];
+    [NSFileManager.defaultManager createDirectoryAtPath:[dir stringByAppendingPathComponent:@"clawd"] withIntermediateDirectories:YES attributes:nil error:NULL];
+    return dir;
+}
+static void CWWriteJSON(NSString *path, id object) {
+    NSData *data=[NSJSONSerialization dataWithJSONObject:object options:0 error:NULL];
+    Require([data writeToFile:path atomically:YES],@"write fixture");
+}
+static void CWWriteSession(NSString *dir, int pid, NSString *status, double ageSeconds) {
+    double ms=(NSDate.date.timeIntervalSince1970-ageSeconds)*1000;
+    CWWriteJSON([dir stringByAppendingPathComponent:[NSString stringWithFormat:@"sessions/%d.json",pid]],
+        @{@"pid":@(pid),@"sessionId":@"fixture",@"status":status,@"updatedAt":@(ms),@"statusUpdatedAt":@(ms)});
+}
+static void CWClearSessions(NSString *dir) {
+    NSString *sessions=[dir stringByAppendingPathComponent:@"sessions"];
+    for(NSString *name in [NSFileManager.defaultManager contentsOfDirectoryAtPath:sessions error:NULL])
+        [NSFileManager.defaultManager removeItemAtPath:[sessions stringByAppendingPathComponent:name] error:NULL];
+}
+// Steps the live director like the 30 Hz timer and checks he never teleports.
+static CWScene CWAdvance(ClawdView *view, double *clock, double seconds, CGFloat width) {
+    CWScene scene=[view sceneAtTime:*clock width:width];
+    double end=*clock+seconds;
+    while(*clock<end) {
+        double before=scene.anchorX;
+        *clock+=1.0/30;
+        scene=[view sceneAtTime:*clock width:width];
+        Require(fabs(scene.anchorX-before)<4.5,@"live acting moves continuously, no teleports");
+        for(NSInteger i=0;i<scene.pixelCount;i++) {
+            NSRect r=scene.pixels[i].rect;
+            Require(NSMinX(r)>=0 && NSMaxX(r)<=width && NSMinY(r)>=0 && NSMaxY(r)<=30,@"live pixels fit strip");
+        }
+        Require(scene.pixelCount<256,@"live scene within pixel budget");
+    }
+    return scene;
+}
+static BOOL CWToolHitsActor(CWScene scene, NSPoint point) {
+    for(NSInteger i=scene.pixelCount-1;i>=0;i--) if(NSPointInRect(point,scene.pixels[i].rect)) return scene.pixels[i].actor;
+    return NO;
+}
+static BOOL CWSceneHasInk(CWScene scene, CWInk ink) {
+    for(NSInteger i=0;i<scene.pixelCount;i++) if(scene.pixels[i].ink==ink) return YES;
+    return NO;
+}
+static void CheckLive(Class widgetClass) {
+    NSString *dir=CWTempClaudeDirectory();
+    for(NSNumber *widthValue in @[@64,@176,@685,@1000]) {
+        CGFloat width=widthValue.doubleValue;
+        id widget=[[widgetClass alloc] init];
+        ClawdView *view=[widget valueForKey:@"view"];
+        Require(view.live,@"live widget builds a live view");
+        // Never touch the real Keychain or network from tests.
+        view.usageFetcher=^(void (^done)(NSDictionary *)){ done(nil); };
+        CWClearSessions(dir);
+        [[NSFileManager defaultManager] removeItemAtPath:[dir stringByAppendingPathComponent:@"clawd/limits.json"] error:NULL];
+        view.claudeDirectory=dir;
+        double clock=10;
+        CWScene scene=CWAdvance(view,&clock,1,width);
+        Require([view.liveStateName isEqual:@"asleep"] && scene.activity==CWActivityNap,@"no sessions: Clawd sleeps");
+        Require(fabs(scene.anchorX-[view anchorMinForWidth:width])<.01,@"sleeps at home");
+
+        CWWriteSession(dir,getpid(),@"busy",0); view.claudeDirectory=dir;
+        scene=CWAdvance(view,&clock,20,width);
+        Require([view.liveStateName isEqual:@"working"],@"busy session reads as working");
+        Require(scene.activity==CWActivityCode && fabs(scene.anchorX-[view anchorMaxForWidth:width])<.01,@"working: Clawd runs to the laptop and codes");
+        Require(CWSceneHasInk(scene,CWInkLaptop),@"working shows the laptop");
+
+        CWWriteSession(dir,getpid(),@"waiting",0); view.claudeDirectory=dir;
+        scene=CWAdvance(view,&clock,3,width);
+        Require([view.liveStateName isEqual:@"waiting"] && scene.activity==CWActivityWave,@"waiting session: Clawd waves for you");
+
+        CWWriteSession(dir,getpid(),@"idle",0); view.claudeDirectory=dir;
+        scene=CWAdvance(view,&clock,2.5,width);
+        Require([view.liveStateName isEqual:@"idle"] && scene.activity!=CWActivityWave && scene.activity!=CWActivityCode,@"recently idle: Clawd leaves the laptop and wanders");
+
+        CWWriteSession(dir,getpid(),@"idle",CWLiveSleepAfterForTests+60); view.claudeDirectory=dir;
+        scene=CWAdvance(view,&clock,22,width);
+        Require([view.liveStateName isEqual:@"asleep"] && scene.activity==CWActivityNap,@"long idle: Clawd goes to sleep");
+
+        CWClearSessions(dir);
+        CWWriteSession(dir,99999,@"busy",0); view.claudeDirectory=dir;
+        CWAdvance(view,&clock,2,width);
+        Require([view.liveStateName isEqual:@"asleep"],@"a session file whose process is gone is ignored");
+
+        // Tap: limits, never the tantrum. Unknown limits first, then real data.
+        scene=[view sceneAtTime:clock width:width];
+        NSPoint body=NSMakePoint(scene.anchorX+NSWidth(scene.actorBounds)/2,NSMidY(scene.actorBounds));
+        Require(CWToolHitsActor(scene,body),@"fixture point lands on Clawd");
+        Require([view handleTapAtPoint:body time:clock width:width],@"tapping live Clawd is accepted");
+        scene=CWAdvance(view,&clock,.5,width);
+        Require(scene.activity==CWActivityLimits,@"live tap shows limits, not mad");
+        Require(CWSceneHasInk(scene,CWInkText),@"limits readout says it has no data");
+        Require([view handleTapAtPoint:NSMakePoint(1,1) time:clock width:width],@"second tap dismisses the readout");
+        Require(![view showingLimitsAtTime:clock],@"readout dismissed");
+
+        double now=NSDate.date.timeIntervalSince1970;
+        CWWriteJSON([dir stringByAppendingPathComponent:@"clawd/limits.json"],@{@"model":[NSNull null],@"rate_limits":@{
+            @"five_hour":@{@"used_percentage":@42,@"resets_at":@(now+80*60)},
+            @"seven_day":@{@"used_percentage":@91.5,@"resets_at":[[NSISO8601DateFormatter new] stringFromDate:[NSDate dateWithTimeIntervalSinceNow:3*86400]]}}});
+        view.claudeDirectory=dir;
+        scene=[view sceneAtTime:clock width:width];
+        body=NSMakePoint(NSMidX(scene.actorBounds),NSMidY(scene.actorBounds));
+        Require([view handleTapAtPoint:body time:clock width:width],@"tap with data");
+        scene=CWAdvance(view,&clock,1,width);
+        Require(CWSceneHasInk(scene,CWInkCode),@"58% left draws a healthy bar");
+        Require(CWSceneHasInk(scene,CWInkLow),@"8% left draws a low bar");
+        scene=CWAdvance(view,&clock,3.2,width);
+        Require(scene.activity!=CWActivityLimits,@"readout puts itself away after 4 seconds");
+    }
+    for(NSNumber *widthValue in @[@176,@685]) {
+        // Tapping him mid-run stops him in place: no sliding, no floating.
+        CGFloat width=widthValue.doubleValue;
+        id widget=[[widgetClass alloc] init];
+        ClawdView *view=[widget valueForKey:@"view"];
+        view.usageFetcher=^(void (^done)(NSDictionary *)){ done(nil); };
+        CWClearSessions(dir);
+        CWWriteSession(dir,getpid(),@"idle",0); view.claudeDirectory=dir;
+        double clock=10;
+        CWScene scene=CWAdvance(view,&clock,.4,width);
+        for(int i=0;i<300 && !(scene.activity==CWActivityRun && scene.travelledDistance>10);i++) scene=CWAdvance(view,&clock,1.0/30,width);
+        Require(scene.activity==CWActivityRun && scene.travelledDistance>10,@"idle Clawd is running");
+        double where=scene.anchorX;
+        Require([view handleTapAtPoint:NSMakePoint(NSMidX(scene.actorBounds),NSMidY(scene.actorBounds)) time:clock width:width],@"tap the running Clawd");
+        for(int i=0;i<110;i++) {
+            scene=CWAdvance(view,&clock,1.0/30,width);
+            Require(scene.activity==CWActivityLimits && fabs(scene.anchorX-where)<.01,@"Clawd stands still while the readout is open");
+        }
+        scene=CWAdvance(view,&clock,1,width);
+        Require(scene.activity==CWActivityRun && fabs(scene.anchorX-where)>1 && fabs(scene.anchorX-where)<70,@"after the readout he runs on from the same spot");
+        // Dismissing early resumes right away.
+        scene=CWAdvance(view,&clock,.1,width);
+        if(scene.activity==CWActivityRun) {
+            where=scene.anchorX;
+            [view handleTapAtPoint:NSMakePoint(NSMidX(scene.actorBounds),NSMidY(scene.actorBounds)) time:clock width:width];
+            CWAdvance(view,&clock,.5,width);
+            Require(fabs([view sceneAtTime:clock width:width].anchorX-where)<.01,@"still paused before dismissal");
+            [view handleTapAtPoint:NSMakePoint(1,1) time:clock width:width];
+            scene=CWAdvance(view,&clock,.3,width);
+            Require(scene.activity!=CWActivityLimits && fabs(scene.anchorX-where)<25,@"dismissal resumes without a jump");
+        }
+    }
+    {
+        // Limits from the usage endpoint's JSON shape (utilization + ISO reset).
+        id widget=[[widgetClass alloc] init];
+        ClawdView *view=[widget valueForKey:@"view"];
+        CWClearSessions(dir);
+        [[NSFileManager defaultManager] removeItemAtPath:[dir stringByAppendingPathComponent:@"clawd/limits.json"] error:NULL];
+        __block int calls=0;
+        NSString *reset=[[NSISO8601DateFormatter new] stringFromDate:[NSDate dateWithTimeIntervalSinceNow:2*3600]];
+        view.usageFetcher=^(void (^done)(NSDictionary *)){
+            calls++;
+            done(@{@"five_hour":@{@"utilization":@10,@"resets_at":reset},@"seven_day":@{@"utilization":@95,@"resets_at":[NSNull null]},@"seven_day_opus":[NSNull null]});
+        };
+        view.claudeDirectory=dir;
+        double clock=10;
+        CWScene scene=CWAdvance(view,&clock,1,176);
+        Require([view handleTapAtPoint:NSMakePoint(NSMidX(scene.actorBounds),NSMidY(scene.actorBounds)) time:clock width:176],@"tap asks for usage");
+        [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:.05]];
+        scene=CWAdvance(view,&clock,.5,176);
+        Require(calls==1,@"one usage request per tap");
+        Require(CWSceneHasInk(scene,CWInkCode) && CWSceneHasInk(scene,CWInkLow),@"usage endpoint limits drive the readout");
+        [view handleTapAtPoint:NSMakePoint(1,1) time:clock width:176];
+        scene=[view sceneAtTime:clock width:176];
+        [view handleTapAtPoint:NSMakePoint(NSMidX(scene.actorBounds),NSMidY(scene.actorBounds)) time:clock width:176];
+        [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:.05]];
+        Require(calls==1,@"repeat taps within a minute reuse the last answer");
+    }
+    [NSFileManager.defaultManager removeItemAtPath:dir error:NULL];
+}
+
 
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
         [NSApplication sharedApplication];
         NSString *mode = argc > 1 ? @(argv[1]) : @"--preview";
+        if ([mode isEqualToString:@"--live"]) mode = @"--preview";
+        if ([mode isEqualToString:@"--check-live"]) {
+            Require(argc > 4, @"usage: ClawdTools --check-live live-bundle framework autonomous-bundle");
+            Require(dlopen(argv[3], RTLD_NOW | RTLD_GLOBAL) != NULL, @"PockKit load");
+            Protocol *hostProtocol = objc_getProtocol("PKWidget");
+            NSError *error;
+            NSBundle *other = [NSBundle bundleWithPath:@(argv[4])];
+            Require([other loadAndReturnError:&error], error.description ?: @"autonomous bundle load");
+            NSBundle *bundle = [NSBundle bundleWithPath:@(argv[2])];
+            Require([bundle loadAndReturnError:&error], error.description ?: @"live bundle load");
+            Class principal = bundle.principalClass;
+            Require(principal != Nil && principal != other.principalClass, @"both widgets load side by side with distinct classes");
+            Require(class_conformsToProtocol(principal, hostProtocol), @"live widget conforms to PockKit PKWidget");
+            Require([[(id)principal performSelector:@selector(identifier)] isEqual:@"com.jurekzsl.pock.ClawdLive"], @"live identifier");
+            id widget = [[principal alloc] init];
+            Require([[widget valueForKey:@"customizationLabel"] isEqual:@"Clawd Live"], @"live label");
+            id otherWidget = [[other.principalClass alloc] init];
+            Require([widget valueForKey:@"view"] != nil && [[widget valueForKey:@"view"] class] != [[otherWidget valueForKey:@"view"] class], @"live view class is separate");
+            Require(![[otherWidget valueForKey:@"view"] isLive], @"autonomous widget stays autonomous");
+            Require(NSEqualSizes([[widget valueForKey:@"imageForCustomization"] size], NSMakeSize(176, 30)), @"live customization image");
+            CheckLive(principal);
+            puts("PASS: Clawd Live loads beside Clawd; sessions busy/waiting/idle/stale/dead map to coding, waving, wandering and sleeping with continuous travel; tap shows limits (no data, healthy, low, from file or usage endpoint, throttled) and dismisses; a tapped runner stops in place and runs on from there; widths 64/176/685/1000 fit.");
+            return 0;
+        }
         if ([mode isEqualToString:@"--check"]) {
             Require(argc > 3, @"usage: ClawdTools --check bundle framework");
             void *framework = dlopen(argv[3], RTLD_NOW | RTLD_GLOBAL);
@@ -144,7 +343,7 @@ int main(int argc, const char *argv[]) {
                 }
                 CWScene start = [actorView autonomousSceneAtTime:0 width:width];
                 CWScene end = [actorView autonomousSceneAtTime:run width:width];
-                Require(start.anchorX == 8 && end.anchorX == width-38, @"runs to both endpoint anchors");
+                Require(start.anchorX == [actorView anchorMinForWidth:width] && end.anchorX == [actorView anchorMaxForWidth:width], @"runs to both endpoint anchors");
                 double boundaries[]={run,run+10,2*run+10,2*run+18,3*run+18,3*run+24,4*run+24,period};
                 for(int i=0;i<8;i++) {
                     CWScene before=[actorView autonomousSceneAtTime:boundaries[i]-.00001 width:width];
@@ -243,10 +442,14 @@ int main(int argc, const char *argv[]) {
         }
         NSURL *executable = [NSURL fileURLWithPath:@(argv[0])].URLByStandardizingPath;
         NSURL *root = executable.URLByDeletingLastPathComponent.URLByDeletingLastPathComponent.URLByDeletingLastPathComponent;
-        NSBundle *previewBundle = [NSBundle bundleWithURL:[root URLByAppendingPathComponent:@"dist/Clawd.pock"]];
+        BOOL live = NO;
+        for (int i = 1; i < argc; i++) if (!strcmp(argv[i], "--live")) live = YES;
+        NSBundle *previewBundle = [NSBundle bundleWithURL:[root URLByAppendingPathComponent:live ? @"dist/ClawdLive.pock" : @"dist/Clawd.pock"]];
         NSError *previewError;
         Require([previewBundle loadAndReturnError:&previewError], previewError.description ?: @"preview bundle load");
-        ClawdView *view = [[NSClassFromString(@"ClawdView") alloc] initWithFrame:NSMakeRect(0, 0, 685, 30)];
+        id previewWidget = [[previewBundle.principalClass alloc] init];
+        ClawdView *view = [previewWidget valueForKey:@"view"];
+        view.translatesAutoresizingMaskIntoConstraints = NO;
         Require(view != nil, @"bundle renderer available");
         if ([mode isEqualToString:@"--reaction"]) {
             Require(argc>2,@"usage: ClawdTools --reaction directory [width]");
@@ -306,7 +509,7 @@ int main(int argc, const char *argv[]) {
         }
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
         NSWindow *window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 760, 170) styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable backing:NSBackingStoreBuffered defer:NO];
-        window.title = @"Clawd · Pock Touch Bar preview";
+        window.title = live ? @"Clawd Live · Pock Touch Bar preview" : @"Clawd · Pock Touch Bar preview";
         window.backgroundColor = [NSColor colorWithWhite:0.09 alpha:1];
         window.releasedWhenClosed = NO;
         window.contentMinSize = NSMakeSize(112, 150);
@@ -321,7 +524,7 @@ int main(int argc, const char *argv[]) {
             [view.trailingAnchor constraintEqualToAnchor:window.contentView.trailingAnchor constant:-24],
             [view.centerYAnchor constraintEqualToAnchor:window.contentView.centerYAnchor]
         ]];
-        NSTextField *hint = [NSTextField labelWithString:@"Resize the bar · poke Clawd himself for a tiny tantrum"];
+        NSTextField *hint = [NSTextField labelWithString:live ? @"Follows your local Claude Code · tap Clawd for remaining limits" : @"Resize the bar · poke Clawd himself for a tiny tantrum"];
         hint.textColor = NSColor.secondaryLabelColor;
         hint.font = [NSFont systemFontOfSize:11];
         hint.frame = NSMakeRect(28, 28, 500, 20);

@@ -1,9 +1,11 @@
 #import "ClawdView.h"
+#import "ClawdLive.h"
 #import <QuartzCore/QuartzCore.h>
 #import <math.h>
 
 static const CGFloat ClawdPreferredWidth = 1000;
 static const CGFloat ClawdHeight = 30;
+static const NSTimeInterval ClawdLimitsDuration = 4;
 
 @implementation ClawdView {
     NSTimer *_timer;
@@ -20,19 +22,32 @@ static const CGFloat ClawdHeight = 30;
     BOOL _sessionInactive;
     BOOL _applicationHidden;
     NSMutableArray<id> *_observers;
+    BOOL _live;
+    CWClaudeMonitor *_monitor;
+    CWDirector _director;
+    NSTimeInterval _limitsTap;
+    // While the readout is open the live acting is paused, like the tantrum
+    // pauses the autonomous loop: Clawd stops where he is instead of sliding.
+    BOOL _limitsOpen;
+    NSTimeInterval _limitsEnd, _liveFrozen, _livePausedTotal;
 }
 
-- (instancetype)initWithFrame:(NSRect)frame {
+- (instancetype)initWithFrame:(NSRect)frame { return [self initWithFrame:frame live:NO]; }
+
+- (instancetype)initWithFrame:(NSRect)frame live:(BOOL)live {
     self = [super initWithFrame:frame];
     if (self) {
         _observers = [NSMutableArray array];
         _lastDirectTouchTime = -100;
+        _limitsTap = -100;
+        _live = live;
+        if (live) _monitor = [[CWClaudeMonitor alloc] initWithClaudeDirectory:[NSHomeDirectory() stringByAppendingPathComponent:@".claude"]];
         self.allowedTouchTypes = NSTouchTypeMaskDirect;
-        self.toolTip = @"Clawd · tap him for a tiny tantrum";
+        self.toolTip = live ? @"Clawd · follows Claude Code · tap him for your remaining limits" : @"Clawd · tap him for a tiny tantrum";
         [self setAccessibilityElement:YES];
         [self setAccessibilityRole:NSAccessibilityButtonRole];
-        [self setAccessibilityLabel:@"Clawd companion"];
-        [self setAccessibilityHelp:@"Press Clawd to make him briefly mad. Empty space does nothing."];
+        [self setAccessibilityLabel:live ? @"Clawd, following Claude Code" : @"Clawd companion"];
+        [self setAccessibilityHelp:live ? @"Press Clawd to show your remaining Claude usage limits." : @"Press Clawd to make him briefly mad. Empty space does nothing."];
         self.translatesAutoresizingMaskIntoConstraints = NO;
         [self setContentHuggingPriority:1 forOrientation:NSLayoutConstraintOrientationHorizontal];
         [self setContentCompressionResistancePriority:1 forOrientation:NSLayoutConstraintOrientationHorizontal];
@@ -129,14 +144,56 @@ static const CGFloat ClawdHeight = 30;
     return CWSampleScene(time, width, -1);
 }
 
+// The live director's clock: wall time minus every readout pause.
+- (NSTimeInterval)liveTimeAtTime:(NSTimeInterval)time {
+    if (_limitsOpen) {
+        if (time < _limitsEnd) return _liveFrozen;
+        _livePausedTotal += _limitsEnd - _limitsTap;
+        _limitsOpen = NO;
+    }
+    return time - _livePausedTotal;
+}
+
 - (CWScene)sceneAtTime:(NSTimeInterval)time width:(CGFloat)width {
+    if (_live) {
+        [_monitor pollIfNeeded];
+        NSTimeInterval liveTime = [self liveTimeAtTime:time];
+        CWDirectorUpdate(&_director, _monitor.state, liveTime, width);
+        CWLimits limits = [_monitor limitsAtDate:NSDate.date];
+        BOOL showing = [self showingLimitsAtTime:time];
+        return CWRenderBeat(CWDirectorBeat(&_director, liveTime, width), width, CWActivityLimits, showing ? time - _limitsTap : -1, &limits);
+    }
     NSTimeInterval base = [self baseTimeAtTime:time];
     return CWSampleScene(base, width, _reacting ? time - _reactionLastTap : -1);
 }
 
+- (BOOL)isLive { return _live; }
+- (BOOL)showingLimitsAtTime:(NSTimeInterval)time { return _live && _limitsOpen && time >= _limitsTap && time < _limitsEnd; }
+- (NSString *)liveStateName { return _live ? CWLiveStateName(_monitor.state) : nil; }
+- (void)setClaudeDirectory:(NSString *)directory { _monitor.claudeDirectory = directory; [_monitor poll]; }
+- (NSString *)claudeDirectory { return _monitor.claudeDirectory; }
+- (void)setUsageFetcher:(void (^)(void (^)(NSDictionary *)))fetcher { _monitor.usageFetcher = fetcher; }
+- (void (^)(void (^)(NSDictionary *)))usageFetcher { return _monitor.usageFetcher; }
+
 - (BOOL)handleTapAtPoint:(NSPoint)point time:(NSTimeInterval)time width:(CGFloat)width {
+    if (_live && [self showingLimitsAtTime:time]) {
+        // Any tap on the strip puts the readout away again.
+        _limitsEnd = time;
+        self.needsDisplay = YES;
+        return YES;
+    }
     CWScene current = [self sceneAtTime:time width:width];
     if (!CWSceneHitsActor(current, point)) return NO;
+    if (_live) {
+        _liveFrozen = [self liveTimeAtTime:time];
+        _limitsTap = time;
+        _limitsEnd = time + ClawdLimitsDuration;
+        _limitsOpen = YES;
+        [_monitor poll];
+        [_monitor refreshUsageIfStale];
+        self.needsDisplay = YES;
+        return YES;
+    }
     if (!_reacting) {
         _reactionBase = current.baseTime;
         _reactionStart = time;
@@ -163,6 +220,7 @@ static const CGFloat ClawdHeight = 30;
         double time = self.animationTime;
         _lastDirectTouchTime = time;
         CGFloat width = self.bounds.size.width;
+        if ([self showingLimitsAtTime:time]) { [self handleTapAtPoint:point time:time width:width]; return; }
         CWScene scene = [self sceneAtTime:time width:width];
         if (point.x < 0 || point.x > width || point.x < NSMinX(scene.actorBounds)-3 || point.x > NSMaxX(scene.actorBounds)+3) return;
         // Route a visible actor pixel through the same anchored reaction path;
@@ -187,6 +245,7 @@ static const CGFloat ClawdHeight = 30;
 
 - (BOOL)accessibilityPerformPress {
     double time = self.animationTime;
+    if ([self showingLimitsAtTime:time]) return [self handleTapAtPoint:NSZeroPoint time:time width:self.bounds.size.width];
     CWScene current = [self sceneAtTime:time width:self.bounds.size.width];
     // The semantic button is the character, so select a visible actor pixel.
     for (NSInteger i=current.pixelCount-1; i>=0; i--) {
@@ -199,6 +258,8 @@ static const CGFloat ClawdHeight = 30;
 }
 
 - (NSTimeInterval)journeyDurationForWidth:(CGFloat)width { return 2 * CWRunDuration(width); }
+- (CGFloat)anchorMinForWidth:(CGFloat)width { return CWAnchorMin(width); }
+- (CGFloat)anchorMaxForWidth:(CGFloat)width { return CWAnchorMax(width); }
 - (NSTimeInterval)sceneDurationForWidth:(CGFloat)width { return CWSceneDuration(width); }
 - (NSString *)activityNameAtTime:(NSTimeInterval)time width:(CGFloat)width {
     return CWActivityName(CWSampleScene(time,width,-1).activity);
@@ -206,14 +267,19 @@ static const CGFloat ClawdHeight = 30;
 
 static NSColor *Ink(CWInk ink) {
     switch(ink) {
-        case CWInkEye:return [NSColor colorWithSRGBRed:.11 green:.10 blue:.095 alpha:1];
+        // Eyes are notches cut out of the body, as in the terminal glyph.
+        case CWInkEye:return [NSColor blackColor];
         case CWInkLaptop:return [NSColor colorWithSRGBRed:.39 green:.43 blue:.45 alpha:1];
         case CWInkScreen:return [NSColor colorWithSRGBRed:.10 green:.17 blue:.18 alpha:1];
         case CWInkCode:return [NSColor colorWithSRGBRed:.53 green:.76 blue:.66 alpha:1];
         case CWInkCup:return [NSColor colorWithSRGBRed:.91 green:.83 blue:.68 alpha:1];
         case CWInkCoffee:return [NSColor colorWithSRGBRed:.34 green:.22 blue:.16 alpha:1];
         case CWInkSteam:return [NSColor colorWithSRGBRed:.56 green:.60 blue:.60 alpha:1];
-        default:return [NSColor colorWithSRGBRed:.84 green:.46 blue:.35 alpha:1];
+        case CWInkText:return [NSColor colorWithSRGBRed:.88 green:.86 blue:.82 alpha:1];
+        case CWInkTrack:return [NSColor colorWithSRGBRed:.22 green:.22 blue:.22 alpha:1];
+        case CWInkWarn:return [NSColor colorWithSRGBRed:.95 green:.71 blue:.30 alpha:1];
+        case CWInkLow:return [NSColor colorWithSRGBRed:.90 green:.33 blue:.30 alpha:1];
+        default:return [NSColor colorWithSRGBRed:215/255.0 green:119/255.0 blue:87/255.0 alpha:1];
     }
 }
 
@@ -250,7 +316,14 @@ static NSColor *Ink(CWInk ink) {
     CGContextRef cg = graphics.CGContext;
     CGContextTranslateCTM(cg, 0, ClawdHeight * scale);
     CGContextScaleCTM(cg, scale, -scale);
-    [self drawScene:CWSampleScene(time,width,reactionAge) inRect:NSMakeRect(0,0,width,ClawdHeight)];
+    CWScene scene;
+    if (_live) {
+        CWDirector director = {0};
+        CWDirectorUpdate(&director, _monitor.state, time, width);
+        CWLimits limits = [_monitor limitsAtDate:NSDate.date];
+        scene = CWRenderBeat(CWDirectorBeat(&director, time, width), width, CWActivityLimits, reactionAge, &limits);
+    } else scene = CWSampleScene(time,width,reactionAge);
+    [self drawScene:scene inRect:NSMakeRect(0,0,width,ClawdHeight)];
     [NSGraphicsContext restoreGraphicsState];
     bitmap.size = NSMakeSize(width, ClawdHeight);
     return bitmap;

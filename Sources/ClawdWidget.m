@@ -1,13 +1,25 @@
 #import "ClawdWidget.h"
 #import "ClawdView.h"
 
+// One source, two bundles. build.sh compiles the live variant with
+// CLAWD_LIVE=1 and renamed classes so both widgets can load in Pock at once.
+#ifdef CLAWD_LIVE
+static NSString *const ClawdIdentifier = @"com.jurekzsl.pock.ClawdLive";
+static NSString *const ClawdLabel = @"Clawd Live";
+static const BOOL ClawdIsLive = YES;
+#else
+static NSString *const ClawdIdentifier = @"com.jurekzsl.pock.Clawd";
+static NSString *const ClawdLabel = @"Clawd";
+static const BOOL ClawdIsLive = NO;
+#endif
+
 @implementation ClawdWidget
-+ (NSString *)identifier { return @"com.jurekzsl.pock.Clawd"; }
++ (NSString *)identifier { return ClawdIdentifier; }
 - (instancetype)init {
     self = [super init];
     if (self) {
-        _customizationLabel = @"Clawd";
-        _view = [[ClawdView alloc] initWithFrame:NSMakeRect(0, 0, 1000, 30)];
+        _customizationLabel = ClawdLabel;
+        _view = [[ClawdView alloc] initWithFrame:NSMakeRect(0, 0, 1000, 30) live:ClawdIsLive];
     }
     return self;
 }
