@@ -16,6 +16,7 @@
 - (void)stopAnimation;
 - (NSTimeInterval)baseTimeAtTime:(NSTimeInterval)time;
 - (CWScene)autonomousSceneAtTime:(NSTimeInterval)time width:(CGFloat)width;
+- (CWScene)autonomousSceneAtTime:(NSTimeInterval)time width:(CGFloat)width reactionAge:(NSTimeInterval)reactionAge;
 - (CWScene)sceneAtTime:(NSTimeInterval)time width:(CGFloat)width;
 - (BOOL)handleTapAtPoint:(NSPoint)point time:(NSTimeInterval)time width:(CGFloat)width;
 - (NSTimeInterval)sceneDurationForWidth:(CGFloat)width;

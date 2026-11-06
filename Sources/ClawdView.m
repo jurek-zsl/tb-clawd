@@ -143,6 +143,9 @@ static const NSTimeInterval ClawdLimitsDuration = 4;
 - (CWScene)autonomousSceneAtTime:(NSTimeInterval)time width:(CGFloat)width {
     return CWSampleScene(time, width, -1);
 }
+- (CWScene)autonomousSceneAtTime:(NSTimeInterval)time width:(CGFloat)width reactionAge:(NSTimeInterval)reactionAge {
+    return CWSampleScene(time, width, reactionAge);
+}
 
 // The live director's clock: wall time minus every readout pause.
 - (NSTimeInterval)liveTimeAtTime:(NSTimeInterval)time {

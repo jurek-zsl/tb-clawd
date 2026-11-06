@@ -2,7 +2,7 @@
 
 A little Clawd, running alongside your work.
 
-![Clawd running across a black Touch Bar strip](docs/assets/preview.gif)
+![Clawd running, coding, sipping coffee, stretching and napping on a black Touch Bar strip](docs/assets/preview.gif)
 
 Native [Pock](https://pock.app) widgets with the Claude Code mascot, redrawn on
 the same half-block pixel grid as the terminal glyph: wide body, eyes as notches
@@ -28,7 +28,13 @@ a yawn, and curls up for a nap, on a fixed loop. Poke Clawd himself and he
 throws a tiny tantrum before returning to exactly what he was doing. Tapping
 the empty bar or his props does nothing.
 
+![Clawd getting briefly mad when poked](docs/assets/mad.gif)
+
 ### Clawd Live: what makes each state
+
+![Clawd Live following a Claude Code session: sleeping, coding, waving, taking a break, showing limits, sleeping again](docs/assets/live.gif)
+
+*The captions are part of this demo, not the widget. Limits shown are sample numbers.*
 
 Clawd Live reads `~/.claude/sessions/<pid>.json` once a second. Claude Code
 (terminal, desktop app and IDE sessions alike) keeps one of these files per
@@ -48,7 +54,9 @@ make him run back and forth. Changes are acted out, never cut: he finishes the
 current action (closes the laptop, lowers the cup, wakes up), runs to where the
 next one happens, then starts it.
 
-**Tap Clawd** to show the remaining 5-hour and 7-day limits for 4 seconds:
+![The limits readout: 5H 63% left, resets in 2H11; 7D 18% left, resets in 3D](docs/assets/limits.png)
+
+**Tap Clawd** and he stops where he is to show the remaining 5-hour and 7-day limits for 4 seconds:
 the label, a bar of what is left (green above 50%, amber above 20%, red below),
 the percentage left, and the time until that window resets. On a narrow bar the
 readout gets smaller, and below about 120 points it takes the whole strip. Tap
@@ -121,11 +129,10 @@ unrelated bundle. Reopen Pock after installing an update.
 
 The resizable native window uses the actual widget renderer and works on Macs
 without a Touch Bar. Resize it to see Clawd adapt to the available space, and
-poke the character to see his reaction.
+poke the character to see his reaction. Add `--live` to watch Clawd Live
+follow your real Claude Code sessions.
 
-![Actual coding, coffee, stretch, nap and mad poses](docs/assets/actions-contact.png)
-
-![Clawd getting briefly mad when poked](docs/assets/mad.gif)
+![Every pose: run, code, coffee, stretch, nap, mad, and Clawd Live waiting and working](docs/assets/actions-contact.png)
 
 A deterministic schedule alternates four journeys with coding (10 seconds),
 coffee (8 seconds), stretching (6 seconds), and napping (10 seconds). Each action
@@ -133,8 +140,8 @@ has a setup, held main action, and recovery: opening/typing/closing the laptop,
 lifting/sipping/lowering the cup, gathering/stretching/yawning, and settling/
 breathing/waking. Props stay attached and point toward the bar interior.
 
-A direct poke pauses this schedule at Clawd's current location. His angry brows,
-shaking, hands on hips and little steam puff settle before the original action
+A direct poke pauses this schedule at Clawd's current location. His angry brow notches,
+raised arms, shaking and little steam puff settle before the original action
 resumes. Repeated pokes restart the reaction without moving him or advancing the
 paused activity. The accessibility press action targets Clawd as well.
 
@@ -142,23 +149,19 @@ Clawd runs at 64 points per second with gentle acceleration at each end; his
 leg cadence follows distance travelled. A 30 fps timer runs while the widget
 is visible and pauses on removal, sleep, inactive user session or app hiding.
 
-To regenerate previews, Pillow is an optional development dependency:
+To regenerate everything in `docs/assets` from the built bundles:
 
 ```sh
-./build/pock/ClawdTools --export build/pock/frames-v1.2 685
-./build/pock/ClawdTools --poses build/pock/poses-v1.2 176
-./build/pock/ClawdTools --reaction build/pock/reaction-v1.2 176
-python3 -m venv build/pock/preview-venv
-build/pock/preview-venv/bin/python -m pip install Pillow
-build/pock/preview-venv/bin/python Tools/make_preview.py
+./build.sh
+./build/pock/ClawdTools --showcase docs/assets
 ```
 
-Export records the complete activity schedule along a 685 point strip. Add a width argument,
-such as `--export build/pock/frames-1000 1000`, to capture another allocation.
-The Python script assembles AppKit-rendered PNGs into `dist/Clawd-preview.gif`
-(full width), `Clawd-actions.gif` (a closer view), `Clawd-mad.gif`, and the labelled
-`Clawd-actions-contact.png`. Labels are outside the widget in the review sheet;
-the Touch Bar itself shows only Clawd and his props.
+The showcase uses the bundles' real renderers, with no redraws: cropping,
+nearest-neighbour scaling and captions outside the strip only. `preview.gif`
+is Clawd's full loop on a 420 point bar, `mad.gif` the tantrum close up,
+`live.gif` Clawd Live driven by scripted session files, `limits.png` the
+readout with sample numbers, and `actions-contact.png` every pose. GIFs are
+written with ImageIO, so no Python or Pillow is needed.
 
 ## Verification
 

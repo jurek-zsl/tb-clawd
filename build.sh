@@ -48,9 +48,9 @@ build_variant ClawdLive com.jurekzsl.pock.ClawdLive "Clawd Live" ClawdLiveWidget
 # The tools load the bundles' actual renderers in every mode. --check loads
 # PockKit first, just as the host does. No widget classes are compiled twice.
 xcrun clang -fobjc-arc -fmodules -Wall -Wextra -Wno-unused-parameter \
-    -mmacosx-version-min=11.0 -O2 -framework AppKit -framework QuartzCore \
+    -mmacosx-version-min=11.0 -O2 -framework AppKit -framework QuartzCore -framework ImageIO \
     -Wl,-rpath,"${POCK_APP:-/Applications/Pock.app}/Contents/Frameworks" \
-    -I "$TASK_DIR/Sources" "$TASK_DIR/Tools/main.m" \
+    -I "$TASK_DIR/Sources" "$TASK_DIR/Tools/main.m" "$TASK_DIR/Tools/showcase.m" \
     -o "$BUILD_DIR/ClawdTools"
 printf 'Built %s\nBuilt %s\nPreview: %s --preview [--live]\n' \
     "$ROOT_DIR/dist/Clawd.pock" "$ROOT_DIR/dist/ClawdLive.pock" "$BUILD_DIR/ClawdTools"

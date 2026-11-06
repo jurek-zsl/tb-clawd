@@ -4,6 +4,7 @@
 #import "ClawdView.h"
 
 static const double CWLiveSleepAfterForTests = 5*60;
+int CWRunShowcase(NSString *output, NSBundle *clawdBundle, NSBundle *liveBundle);
 
 static void Require(BOOL condition, NSString *message) {
     if (!condition) { fprintf(stderr, "FAIL: %s\n", message.UTF8String); exit(1); }
@@ -442,6 +443,14 @@ int main(int argc, const char *argv[]) {
         }
         NSURL *executable = [NSURL fileURLWithPath:@(argv[0])].URLByStandardizingPath;
         NSURL *root = executable.URLByDeletingLastPathComponent.URLByDeletingLastPathComponent.URLByDeletingLastPathComponent;
+        if ([mode isEqualToString:@"--showcase"]) {
+            Require(argc > 2, @"usage: ClawdTools --showcase directory");
+            NSError *error;
+            NSBundle *clawdBundle = [NSBundle bundleWithURL:[root URLByAppendingPathComponent:@"dist/Clawd.pock"]];
+            NSBundle *liveBundle = [NSBundle bundleWithURL:[root URLByAppendingPathComponent:@"dist/ClawdLive.pock"]];
+            Require([clawdBundle loadAndReturnError:&error] && [liveBundle loadAndReturnError:&error], error.description ?: @"showcase bundle load");
+            return CWRunShowcase(@(argv[2]), clawdBundle, liveBundle);
+        }
         BOOL live = NO;
         for (int i = 1; i < argc; i++) if (!strcmp(argv[i], "--live")) live = YES;
         NSBundle *previewBundle = [NSBundle bundleWithURL:[root URLByAppendingPathComponent:live ? @"dist/ClawdLive.pock" : @"dist/Clawd.pock"]];
