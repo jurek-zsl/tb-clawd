@@ -9,7 +9,12 @@ static const CGFloat ClawdHeight = 30;
     NSTimer *_timer;
     NSTimeInterval _elapsed;
     CFTimeInterval _startedAt;
-    NSTimeInterval _hopAt;
+    NSTimeInterval _pausedTotal;
+    NSTimeInterval _reactionBase;
+    NSTimeInterval _reactionStart;
+    NSTimeInterval _reactionLastTap;
+    NSTimeInterval _lastDirectTouchTime;
+    BOOL _reacting;
     BOOL _wanted;
     BOOL _sleeping;
     BOOL _sessionInactive;
@@ -20,13 +25,14 @@ static const CGFloat ClawdHeight = 30;
 - (instancetype)initWithFrame:(NSRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
-        _hopAt = -100;
         _observers = [NSMutableArray array];
-        self.toolTip = @"Clawd · tap for a little hop";
+        _lastDirectTouchTime = -100;
+        self.allowedTouchTypes = NSTouchTypeMaskDirect;
+        self.toolTip = @"Clawd · tap him for a tiny tantrum";
         [self setAccessibilityElement:YES];
         [self setAccessibilityRole:NSAccessibilityButtonRole];
-        [self setAccessibilityLabel:@"Running Clawd"];
-        [self setAccessibilityHelp:@"Press to make Clawd hop."];
+        [self setAccessibilityLabel:@"Clawd companion"];
+        [self setAccessibilityHelp:@"Press Clawd to make him briefly mad. Empty space does nothing."];
         self.translatesAutoresizingMaskIntoConstraints = NO;
         [self setContentHuggingPriority:1 forOrientation:NSLayoutConstraintOrientationHorizontal];
         [self setContentCompressionResistancePriority:1 forOrientation:NSLayoutConstraintOrientationHorizontal];
@@ -111,83 +117,130 @@ static const CGFloat ClawdHeight = 30;
 - (void)startAnimation { _wanted = YES; [self updateTimer]; }
 - (void)stopAnimation { _wanted = NO; [self updateTimer]; }
 - (void)setHidden:(BOOL)hidden { [super setHidden:hidden]; [self updateTimer]; }
-- (void)hop { _hopAt = self.animationTime; self.needsDisplay = YES; }
-- (void)mouseDown:(NSEvent *)event { [self hop]; }
-- (BOOL)accessibilityPerformPress { [self hop]; return YES; }
-
-static void PixelRect(CGFloat x, CGFloat y, CGFloat width, CGFloat height) {
-    NSRectFill(NSMakeRect(round(x), round(y), width, height));
+- (NSTimeInterval)baseTimeAtTime:(NSTimeInterval)time {
+    if (_reacting && time >= _reactionLastTap + 2.5) {
+        _pausedTotal += _reactionLastTap + 2.5 - _reactionStart;
+        _reacting = NO;
+    }
+    return _reacting ? _reactionBase : MAX(0, time - _pausedTotal);
 }
 
-- (NSTimeInterval)journeyDurationForWidth:(CGFloat)width {
-    CGFloat travel = MAX(0, width - 46);
-    // Accelerate for at most .3s, then run at 64pt/s regardless of bar width.
-    double acceleration = MIN(0.3, travel / 64.0);
-    return MAX(0.1, 2 * (travel / 64.0 + acceleration));
+- (CWScene)autonomousSceneAtTime:(NSTimeInterval)time width:(CGFloat)width {
+    return CWSampleScene(time, width, -1);
 }
 
-- (void)drawSceneInRect:(NSRect)rect time:(NSTimeInterval)time hopAge:(NSTimeInterval)hopAge {
+- (CWScene)sceneAtTime:(NSTimeInterval)time width:(CGFloat)width {
+    NSTimeInterval base = [self baseTimeAtTime:time];
+    return CWSampleScene(base, width, _reacting ? time - _reactionLastTap : -1);
+}
+
+- (BOOL)handleTapAtPoint:(NSPoint)point time:(NSTimeInterval)time width:(CGFloat)width {
+    CWScene current = [self sceneAtTime:time width:width];
+    if (!CWSceneHitsActor(current, point)) return NO;
+    if (!_reacting) {
+        _reactionBase = current.baseTime;
+        _reactionStart = time;
+        _reacting = YES;
+    }
+    _reactionLastTap = time;
+    self.needsDisplay = YES;
+    return YES;
+}
+
+- (void)mouseDown:(NSEvent *)event {
+    // A Touch Bar press may also synthesize a mouse event. Count it once.
+    if (self.animationTime - _lastDirectTouchTime < .15) return;
+    NSPoint point = [self convertPoint:event.locationInWindow fromView:nil];
+    [self handleTapAtPoint:point time:self.animationTime width:self.bounds.size.width];
+}
+
+- (void)touchesBeganWithEvent:(NSEvent *)event {
+    for (NSTouch *touch in [event touchesMatchingPhase:NSTouchPhaseBegan inView:self]) {
+        if (touch.type != NSTouchTypeDirect) continue;
+        // locationInView already uses this flipped view's coordinates. Touch
+        // Bar touch geometry provides a meaningful horizontal component only.
+        NSPoint point = [touch locationInView:self];
+        double time = self.animationTime;
+        _lastDirectTouchTime = time;
+        CGFloat width = self.bounds.size.width;
+        CWScene scene = [self sceneAtTime:time width:width];
+        if (point.x < 0 || point.x > width || point.x < NSMinX(scene.actorBounds)-3 || point.x > NSMaxX(scene.actorBounds)+3) return;
+        // Route a visible actor pixel through the same anchored reaction path;
+        // the horizontal hit accepts a finger regardless of its reported y.
+        for (NSInteger i=scene.pixelCount-1; i>=0; i--) {
+            if (!scene.pixels[i].actor) continue;
+            NSRect pixel = scene.pixels[i].rect;
+            NSPoint target = NSMakePoint(NSMidX(pixel), NSMidY(pixel));
+            if (CWSceneHitsActor(scene,target)) {
+                [self handleTapAtPoint:target time:time width:width];
+                return;
+            }
+        }
+        return;
+    }
+}
+
+// A contact begins one reaction; dragging or releasing it does not repoke.
+- (void)touchesMovedWithEvent:(NSEvent *)event {}
+- (void)touchesEndedWithEvent:(NSEvent *)event {}
+- (void)touchesCancelledWithEvent:(NSEvent *)event {}
+
+- (BOOL)accessibilityPerformPress {
+    double time = self.animationTime;
+    CWScene current = [self sceneAtTime:time width:self.bounds.size.width];
+    // The semantic button is the character, so select a visible actor pixel.
+    for (NSInteger i=current.pixelCount-1; i>=0; i--) {
+        if (!current.pixels[i].actor) continue;
+        NSRect pixel = current.pixels[i].rect;
+        NSPoint point = NSMakePoint(NSMidX(pixel), NSMidY(pixel));
+        if (CWSceneHitsActor(current,point)) return [self handleTapAtPoint:point time:time width:self.bounds.size.width];
+    }
+    return NO;
+}
+
+- (NSTimeInterval)journeyDurationForWidth:(CGFloat)width { return 2 * CWRunDuration(width); }
+- (NSTimeInterval)sceneDurationForWidth:(CGFloat)width { return CWSceneDuration(width); }
+- (NSString *)activityNameAtTime:(NSTimeInterval)time width:(CGFloat)width {
+    return CWActivityName(CWSampleScene(time,width,-1).activity);
+}
+
+static NSColor *Ink(CWInk ink) {
+    switch(ink) {
+        case CWInkEye:return [NSColor colorWithSRGBRed:.11 green:.10 blue:.095 alpha:1];
+        case CWInkLaptop:return [NSColor colorWithSRGBRed:.39 green:.43 blue:.45 alpha:1];
+        case CWInkScreen:return [NSColor colorWithSRGBRed:.10 green:.17 blue:.18 alpha:1];
+        case CWInkCode:return [NSColor colorWithSRGBRed:.53 green:.76 blue:.66 alpha:1];
+        case CWInkCup:return [NSColor colorWithSRGBRed:.91 green:.83 blue:.68 alpha:1];
+        case CWInkCoffee:return [NSColor colorWithSRGBRed:.34 green:.22 blue:.16 alpha:1];
+        case CWInkSteam:return [NSColor colorWithSRGBRed:.56 green:.60 blue:.60 alpha:1];
+        default:return [NSColor colorWithSRGBRed:.84 green:.46 blue:.35 alpha:1];
+    }
+}
+
+- (void)drawScene:(CWScene)scene inRect:(NSRect)rect {
     [NSColor.blackColor setFill];
     NSRectFill(rect);
     [NSGraphicsContext saveGraphicsState];
     NSRectClip(rect);
     CGContextRef context = NSGraphicsContext.currentContext.CGContext;
     CGContextSetShouldAntialias(context, NO);
-
-    CGFloat travel = MAX(0, rect.size.width - 46);
-    double halfDuration = [self journeyDurationForWidth:rect.size.width] / 2;
-    double legIndex = floor(MAX(0, time) / halfDuration);
-    double legTime = fmod(MAX(0, time), halfDuration);
-    double acceleration = MIN(0.3, travel / 64.0);
-    CGFloat distance;
-    if (acceleration <= 0) {
-        distance = 0;
-    } else if (legTime < acceleration) {
-        distance = 32.0 * legTime * legTime / acceleration;
-    } else if (legTime > halfDuration - acceleration) {
-        double remaining = halfDuration - legTime;
-        distance = travel - 32.0 * remaining * remaining / acceleration;
-    } else {
-        distance = 64.0 * (legTime - acceleration / 2);
+    for (NSInteger i=0; i<scene.pixelCount; i++) {
+        CWPixel pixel=scene.pixels[i];
+        [Ink(pixel.ink) setFill];
+        NSRectFill(NSOffsetRect(pixel.rect,rect.origin.x,rect.origin.y));
     }
-    BOOL right = fmod(legIndex, 2) < 1;
-    CGFloat x = round(rect.origin.x + 8 + (right ? distance : travel - distance));
-    // Gait follows travelled distance, so feet settle as Clawd slows to turn.
-    double stride = travel > 0 ? travel / MAX(1, round(travel / 20)) : 20;
-    double gait = (legIndex * travel + distance) / stride * 2 * M_PI;
-    CGFloat hop = (hopAge >= 0 && hopAge < 0.55) ? 5.0 * sin(M_PI * hopAge / 0.55) : 0;
-    CGFloat bob = round((1 - cos(gait * 2)) * 0.5);
-    CGFloat y = rect.origin.y + 6 - bob - round(hop);
-
-    // The Claude Code silhouette has a flat rectangular body, side tabs,
-    // square eyes and two pairs of separated legs. No ears or rounded head.
-    [[NSColor colorWithSRGBRed:0.84 green:0.46 blue:0.35 alpha:1] setFill];
-    const CGFloat hips[] = {3, 8, 19, 24};
-    for (int leg = 0; leg < 4; leg++) {
-        double phase = gait + (leg >= 2 ? M_PI : 0);
-        CGFloat hip = x + hips[leg];
-        CGFloat swing = round(sin(phase));
-        CGFloat lift = round(MAX(0, cos(phase)) * 2);
-        PixelRect(hip, y + 15, 3, 3);
-        PixelRect(hip + swing, y + 17 - lift, 3, 5);
-    }
-    PixelRect(x + 3, y, 24, 16);
-    PixelRect(x, y + 5 + round(sin(gait)), 3, 6);
-    PixelRect(x + 27, y + 5 - round(sin(gait)), 3, 6);
-    [[NSColor colorWithSRGBRed:28/255.0 green:25/255.0 blue:24/255.0 alpha:1] setFill];
-    BOOL blink = fmod(time + 0.8, 4.7) < 0.12;
-    CGFloat gaze = right ? 1 : -1;
-    PixelRect(x + 6 + gaze, y + 5, 3, blink ? 1 : 3);
-    PixelRect(x + 21 + gaze, y + 5, 3, blink ? 1 : 3);
     [NSGraphicsContext restoreGraphicsState];
 }
 
 - (void)drawRect:(NSRect)dirtyRect {
-    NSTimeInterval time = self.animationTime;
-    [self drawSceneInRect:self.bounds time:time hopAge:time - _hopAt];
+    [self drawScene:[self sceneAtTime:self.animationTime width:self.bounds.size.width] inRect:self.bounds];
 }
 
 - (NSBitmapImageRep *)bitmapAtTime:(NSTimeInterval)time width:(CGFloat)width scale:(NSInteger)scale {
+    return [self bitmapAtTime:time width:width scale:scale reactionAge:-1];
+}
+
+- (NSBitmapImageRep *)bitmapAtTime:(NSTimeInterval)time width:(CGFloat)width scale:(NSInteger)scale reactionAge:(NSTimeInterval)reactionAge {
     width = MAX(64, round(width));
     scale = MAX(1, scale);
     NSBitmapImageRep *bitmap = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:NULL pixelsWide:width * scale pixelsHigh:ClawdHeight * scale bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES isPlanar:NO colorSpaceName:NSCalibratedRGBColorSpace bytesPerRow:0 bitsPerPixel:0];
@@ -197,7 +250,7 @@ static void PixelRect(CGFloat x, CGFloat y, CGFloat width, CGFloat height) {
     CGContextRef cg = graphics.CGContext;
     CGContextTranslateCTM(cg, 0, ClawdHeight * scale);
     CGContextScaleCTM(cg, scale, -scale);
-    [self drawSceneInRect:NSMakeRect(0, 0, width, ClawdHeight) time:time hopAge:-1];
+    [self drawScene:CWSampleScene(time,width,reactionAge) inRect:NSMakeRect(0,0,width,ClawdHeight)];
     [NSGraphicsContext restoreGraphicsState];
     bitmap.size = NSMakeSize(width, ClawdHeight);
     return bitmap;

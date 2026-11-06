@@ -9,7 +9,7 @@ for ARCH in arm64 x86_64; do
     xcrun clang -fobjc-arc -fmodules -Wall -Wextra -Wno-unused-parameter \
         -arch "$ARCH" -mmacosx-version-min=11.0 -O2 -bundle \
         -framework AppKit -framework QuartzCore \
-        "$TASK_DIR/Sources/ClawdView.m" "$TASK_DIR/Sources/ClawdWidget.m" \
+        "$TASK_DIR/Sources/ClawdScene.m" "$TASK_DIR/Sources/ClawdView.m" "$TASK_DIR/Sources/ClawdWidget.m" \
         -o "$BUILD_DIR/Clawd-$ARCH"
 done
 xcrun lipo -create "$BUILD_DIR/Clawd-arm64" "$BUILD_DIR/Clawd-x86_64" -output "$BUNDLE/Contents/MacOS/Clawd"
