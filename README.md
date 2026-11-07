@@ -62,32 +62,49 @@ the percentage left, and the time until that window resets. On a narrow bar the
 readout gets smaller, and below about 120 points it takes the whole strip. Tap
 again to put it away.
 
-**Where the limits come from.** On a tap, Clawd Live asks the same usage
-endpoint Claude Code's `/usage` uses (`api.anthropic.com/api/oauth/usage`),
-signed in with Claude Code's own credentials from the Keychain item
-`Claude Code-credentials`. macOS asks once whether Pock may read that item;
-choose **Always Allow**. The token is only sent to Anthropic, is never stored or
-logged, and is never refreshed (refreshing would rotate it underneath Claude
-Code), so if it has expired the readout shows `?` until Claude Code renews it.
-While the request is in flight it shows `...`. Answers are reused for a minute,
-and failures wait five minutes before trying again. The endpoint is
-undocumented, so a Claude Code update could change it.
+**Where the limits come from.** Clawd Live never touches your Keychain or your
+sign-in. On a tap it asks Claude Code itself: it runs the `claude` binary once,
+non-interactively, with a one-word prompt to the cheapest model and no tools
+(`claude -p ok --output-format stream-json --model haiku --max-turns 1 --tools ""
+--no-session-persistence --setting-sources "" ...`). Claude Code answers with a
+`rate_limit_event` carrying each window's utilization and reset time, from the
+rate-limit headers of that one reply. Claude Code does its own sign-in and token
+renewal, so nothing expires on the widget's side.
 
-Optionally, the terminal CLI can also feed the readout through its status line
-payload (`rate_limits`); the Claude desktop app does not run status line
-commands. `setup-live.sh` installs a small bridge at `~/.claude/clawd/statusline.sh`
-and points `statusLine` in `~/.claude/settings.json` at it (backing the file up
-first); an existing status line keeps running after it. Undo it with
-`setup-live.sh --uninstall`. The newest of the two sources wins.
+- **Cost:** one tiny request per check, roughly $0.0002 and about 3 seconds. Answers
+  are reused for 5 minutes; a failed check is retried after 2.
+- **While it runs:** the readout shows the Claude desktop app's own history
+  (`~/Library/Application Support/Claude/plan-usage-history.json`) as a
+  placeholder: percentages only, no reset times, and ignored once older than its
+  window. Real numbers replace it as soon as the check lands.
+- **Which binary:** `~/.local/bin/claude`, `~/.claude/local/claude`, Homebrew and
+  `PATH` copies first, then the newest copy bundled inside the Claude desktop app.
+- **Your sessions:** the check is itself a brief Claude session; Clawd Live
+  recognises its own process and ignores it, so it never wakes him.
+- **Optional:** the terminal CLI can also feed the readout live through its status
+  line payload (`rate_limits`) with `setup-live.sh`, which costs no requests. The
+  newest source wins.
 
-Apart from that one usage request to Anthropic, Clawd Live only reads files under `~/.claude` and sends nothing anywhere.
+If it can't show numbers it says why, in amber:
+
+| Readout | Meaning |
+|---|---|
+| `NO CLAUDE` | No `claude` binary was found (install Claude Code or the desktop app) |
+| `NO LOGIN` | Claude Code is not signed in |
+| `NO LIMITS` | Claude answered but reported no plan limits (for example API-key billing) |
+| `FAILED` | The check crashed, timed out after 25 seconds, or printed nothing usable |
+
+The event format is part of Claude Code's streaming output, not a documented
+promise, so a Claude Code update could change it.
+
+Clawd Live makes no network requests of its own; the only traffic is the limits check that Claude Code itself performs. It reads files under `~/.claude` and the desktop app's usage history.
 
 ## Install
 
 1. Download **Clawd.pock.zip** and/or **ClawdLive.pock.zip** from the [latest release](https://github.com/jurek-zsl/tb-clawd/releases/latest) and unzip them.
 2. Open each extracted bundle with Pock and follow its installation prompt.
 3. Quit and reopen Pock, choose **Customize Pock…** from its menu bar menu, and drag **Clawd** or **Clawd Live** onto your Touch Bar.
-4. The first time you tap Clawd Live, allow Pock to read `Claude Code-credentials` in the Keychain prompt.
+4. Tap Clawd Live for your limits. No permission prompts: it only needs Claude Code (or the Claude desktop app) installed.
 
 If opening a bundle does not launch Pock's installer, put it in
 `~/Library/Application Support/Pock/Widgets/`, then reopen Pock. Releases are

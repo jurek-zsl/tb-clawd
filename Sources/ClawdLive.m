@@ -2,7 +2,7 @@
 #import <math.h>
 #import <signal.h>
 #import <errno.h>
-#import <Security/Security.h>
+#import <unistd.h>
 
 const NSTimeInterval CWLiveSleepAfter = 5*60;
 
@@ -25,17 +25,24 @@ typedef struct { BOOL known; double used; double resetsAt; } CWWindowRecord;
     BOOL _fileAvailable;
     double _fileTime;
     CWWindowRecord _fileFiveHour, _fileSevenDay;
-    // From the usage endpoint.
+    // From asking the Claude Code binary (see runClaudeUsage:).
     BOOL _apiAvailable, _fetching, _lastFailed;
     double _apiTime, _lastAttempt;
     CWWindowRecord _apiFiveHour, _apiSevenDay;
+    // From the Claude desktop app's own history file: percentages only.
+    BOOL _historyAvailable;
+    CWWindowRecord _historyFiveHour, _historySevenDay;
+    char _note[12];
+    pid_t _probePID;    // the claude process this monitor started, if any
 }
 
 - (instancetype)initWithClaudeDirectory:(NSString *)directory {
     self = [super init];
     if (self) {
         _claudeDirectory = [directory copy]; _lastPoll = -100; _state = CWLiveAsleep; _lastAttempt = -1e9;
-        _usageFetcher = [CWClaudeMonitor defaultUsageFetcher];
+        _usageTimeout = 25;
+        __weak CWClaudeMonitor *weakSelf = self;
+        _usageFetcher = ^(void (^completion)(NSDictionary *)) { [weakSelf runClaudeUsage:completion]; };
     }
     return self;
 }
@@ -101,6 +108,9 @@ static CWWindowRecord ParseWindow(id value) {
         NSDictionary *session = json;
         // Stale files from exited sessions and pre-warmed spares do not count.
         if (!ProcessAlive((pid_t)Number(session[@"pid"]))) continue;
+        // The widget's own limits check is a short-lived Claude session: it must
+        // not make Clawd run to the laptop.
+        if ((pid_t)Number(session[@"pid"]) == [self probePID]) continue;
         if ([session[@"spare"] respondsToSelector:@selector(boolValue)] && [session[@"spare"] boolValue]) continue;
         NSString *status = [session[@"status"] isKindOfClass:NSString.class] ? [session[@"status"] lowercaseString] : @"";
         if ([status isEqualToString:@"busy"]) busy = YES;
@@ -127,63 +137,155 @@ static CWWindowRecord ParseWindow(id value) {
             _fileTime = modified ? modified.timeIntervalSince1970 : 0;
         }
     }
+    [self loadHistory];
+}
+
+- (NSString *)limitsNote { return [NSString stringWithUTF8String:_note]; }
+- (pid_t)probePID { @synchronized (self) { return _probePID; } }
+- (void)setProbePID:(pid_t)pid { @synchronized (self) { _probePID = pid; } }
+
+// The Claude desktop app records plan usage as it checks it: {"samples":[{"t":
+// ms, "org":..., "u":{"fh": 5-hour %, "sd": 7-day %}}]}. No credentials, but
+// also no reset times, and it only updates when the app asks. It is shown
+// only until a real check lands. A sample older than its window means nothing.
+- (NSString *)effectiveHistoryPath {
+    if (_historyPath) return _historyPath;
+    NSString *home = [NSHomeDirectory() stringByAppendingPathComponent:@".claude"];
+    if (![_claudeDirectory isEqualToString:home]) return nil;
+    return [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Application Support/Claude/plan-usage-history.json"];
+}
+
+- (void)loadHistory {
+    _historyAvailable = NO;
+    NSString *path = [self effectiveHistoryPath];
+    NSData *data = path.length ? [NSData dataWithContentsOfFile:path] : nil;
+    id json = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL] : nil;
+    NSArray *samples = [json isKindOfClass:NSDictionary.class] ? json[@"samples"] : nil;
+    if (![samples isKindOfClass:NSArray.class]) return;
+    NSDictionary *newest = nil; double newestTime = -1;
+    for (id sample in samples) {
+        if (![sample isKindOfClass:NSDictionary.class]) continue;
+        double when = ParseTime(sample[@"t"]);
+        if (!isnan(when) && when > newestTime) { newest = sample; newestTime = when; }
+    }
+    NSDictionary *used = [newest[@"u"] isKindOfClass:NSDictionary.class] ? newest[@"u"] : nil;
+    if (!used) return;
+    double age = NSDate.date.timeIntervalSince1970 - newestTime;
+    double five = Number(used[@"fh"]), seven = Number(used[@"sd"]);
+    _historyFiveHour = (CWWindowRecord){!isnan(five) && age < 5*3600, isnan(five) ? 0 : five, NAN};
+    _historySevenDay = (CWWindowRecord){!isnan(seven) && age < 7*86400, isnan(seven) ? 0 : seven, NAN};
+    _historyAvailable = _historyFiveHour.known || _historySevenDay.known;
 }
 
 // ---------------------------------------------------------- usage fetch ---
 
-static NSString *const CWUsageURL = @"https://api.anthropic.com/api/oauth/usage";
-static NSString *const CWUsageBeta = @"oauth-2025-04-20";
-static NSString *const CWCredentialsService = @"Claude Code-credentials";
-
-// Claude Code's own sign-in, read-only. macOS asks once whether Pock may read
-// it. The token is used for this one request and never stored or refreshed:
-// refreshing would rotate it underneath Claude Code.
-static NSString *ReadAccessToken(void) {
-    NSDictionary *query = @{
-        (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
-        (__bridge id)kSecAttrService: CWCredentialsService,
-        (__bridge id)kSecReturnData: @YES,
-        (__bridge id)kSecMatchLimit: (__bridge id)kSecMatchLimitOne,
-    };
-    CFTypeRef result = NULL;
-    if (SecItemCopyMatching((__bridge CFDictionaryRef)query, &result) != errSecSuccess || !result) return nil;
-    NSData *data = CFBridgingRelease(result);
-    id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL];
-    NSDictionary *oauth = [json isKindOfClass:NSDictionary.class] ? json[@"claudeAiOauth"] : nil;
-    if (![oauth isKindOfClass:NSDictionary.class]) return nil;
-    NSString *token = oauth[@"accessToken"];
-    double expires = ParseTime(oauth[@"expiresAt"]);
-    if (![token isKindOfClass:NSString.class] || !token.length) return nil;
-    if (!isnan(expires) && expires < NSDate.date.timeIntervalSince1970) return nil;
-    return token;
+// Remaining limits come from Claude Code itself: a one-line, tool-less prompt
+// to the cheapest model through `claude -p --output-format stream-json`, which
+// emits a `rate_limit_event` with each window's utilization (0...1) and reset
+// time. Claude Code does its own sign-in, renewal and Keychain access, so the
+// widget never sees a credential or a token. The check shows up as a short
+// Claude session; the monitor ignores it by process id.
+- (NSString *)resolveClaudeExecutable {
+    NSFileManager *files = NSFileManager.defaultManager;
+    if (_claudeExecutable.length) return [files isExecutableFileAtPath:_claudeExecutable] ? _claudeExecutable : nil;
+    NSString *home = NSHomeDirectory();
+    NSMutableArray<NSString *> *candidates = [NSMutableArray arrayWithObjects:
+        [home stringByAppendingPathComponent:@".local/bin/claude"],
+        [home stringByAppendingPathComponent:@".claude/local/claude"],
+        @"/opt/homebrew/bin/claude", @"/usr/local/bin/claude", nil];
+    for (NSString *dir in [NSProcessInfo.processInfo.environment[@"PATH"] componentsSeparatedByString:@":"])
+        if (dir.length) [candidates addObject:[dir stringByAppendingPathComponent:@"claude"]];
+    // The binary bundled in the Claude desktop app, newest version first.
+    NSString *bundled = [home stringByAppendingPathComponent:@"Library/Application Support/Claude/claude-code"];
+    NSArray<NSString *> *versions = [[files contentsOfDirectoryAtPath:bundled error:NULL] sortedArrayUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
+        return [b compare:a options:NSNumericSearch];
+    }];
+    for (NSString *version in versions) {
+        NSString *versionDir = [bundled stringByAppendingPathComponent:version];
+        for (NSString *build in [files contentsOfDirectoryAtPath:versionDir error:NULL])
+            [candidates addObject:[versionDir stringByAppendingPathComponent:[build stringByAppendingPathComponent:@"claude.app/Contents/MacOS/claude"]]];
+    }
+    for (NSString *path in candidates) if ([files isExecutableFileAtPath:path]) return path;
+    return nil;
 }
 
-+ (void (^)(void (^)(NSDictionary *)))defaultUsageFetcher {
-    return ^(void (^completion)(NSDictionary *)) {
-        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-            NSString *token = ReadAccessToken();
-            if (!token) { completion(nil); return; }
-            NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:CWUsageURL]];
-            request.timeoutInterval = 10;
-            [request setValue:[@"Bearer " stringByAppendingString:token] forHTTPHeaderField:@"Authorization"];
-            [request setValue:CWUsageBeta forHTTPHeaderField:@"anthropic-beta"];
-            [request setValue:@"application/json" forHTTPHeaderField:@"Accept"];
-            [request setValue:@"clawd-touchbar" forHTTPHeaderField:@"User-Agent"];
-            NSURLSessionConfiguration *configuration = NSURLSessionConfiguration.ephemeralSessionConfiguration;
-            NSURLSession *session = [NSURLSession sessionWithConfiguration:configuration];
-            [[session dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-                NSInteger status = [response isKindOfClass:NSHTTPURLResponse.class] ? ((NSHTTPURLResponse *)response).statusCode : 0;
-                id json = (!error && status == 200 && data) ? [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL] : nil;
-                completion([json isKindOfClass:NSDictionary.class] ? json : nil);
-            }] resume];
-            [session finishTasksAndInvalidate];
+// Converts the event stream to the shape finishUsage: reads: windows as
+// {utilization: percent, resets_at: epoch seconds}, or {error: "WORD"}.
+static NSDictionary *UsageFromStream(NSData *output, BOOL timedOut) {
+    NSDictionary *limitEvent = nil, *result = nil;
+    NSString *text = [[NSString alloc] initWithData:output encoding:NSUTF8StringEncoding] ?: @"";
+    for (NSString *line in [text componentsSeparatedByString:@"\n"]) {
+        if (![line hasPrefix:@"{"]) continue;
+        id json = [NSJSONSerialization JSONObjectWithData:[line dataUsingEncoding:NSUTF8StringEncoding] options:0 error:NULL];
+        if (![json isKindOfClass:NSDictionary.class]) continue;
+        NSString *type = json[@"type"];
+        if ([type isEqualToString:@"rate_limit_event"]) limitEvent = json;
+        else if ([type isEqualToString:@"result"]) result = json;
+    }
+    NSDictionary *info = [limitEvent[@"rate_limit_info"] isKindOfClass:NSDictionary.class] ? limitEvent[@"rate_limit_info"] : nil;
+    NSMutableDictionary *usage = [NSMutableDictionary dictionary];
+    NSDictionary *windows = [info[@"unifiedWindows"] isKindOfClass:NSDictionary.class] ? info[@"unifiedWindows"] : nil;
+    for (NSString *key in @[@"five_hour", @"seven_day"]) {
+        NSDictionary *window = [windows[key] isKindOfClass:NSDictionary.class] ? windows[key] : nil;
+        double utilization = Number(window[@"utilization"]);
+        if (isnan(utilization)) continue;
+        usage[key] = @{@"utilization": @(utilization*100), @"resets_at": window[@"resetsAt"] ?: [NSNull null]};
+    }
+    // Older builds report only the binding window at the top level.
+    NSString *binding = [info[@"rateLimitType"] isKindOfClass:NSString.class] ? info[@"rateLimitType"] : nil;
+    if (!usage.count && binding && !isnan(Number(info[@"utilization"])))
+        usage[binding] = @{@"utilization": @(Number(info[@"utilization"])*100), @"resets_at": info[@"resetsAt"] ?: [NSNull null]};
+    if (usage.count) return usage;
+    NSString *message = [[result[@"result"] isKindOfClass:NSString.class] ? result[@"result"] : @"" lowercaseString];
+    if ([message containsString:@"login"] || [message containsString:@"log in"] || [message containsString:@"authenticat"] || [message containsString:@"api key"])
+        return @{@"error": @"NO LOGIN"};
+    if (!timedOut && [result[@"is_error"] isEqual:@NO] && result[@"subtype"] && [result[@"subtype"] isEqual:@"success"]) return @{@"error": @"NO LIMITS"};
+    return @{@"error": @"FAILED"};
+}
+
+- (void)runClaudeUsage:(void (^)(NSDictionary *))completion {
+    NSString *executable = [self resolveClaudeExecutable];
+    if (!executable) { completion(@{@"error": @"NO CLAUDE"}); return; }
+    NSTimeInterval timeout = _usageTimeout;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        NSTask *task = [NSTask new];
+        task.executableURL = [NSURL fileURLWithPath:executable];
+        task.arguments = @[@"-p", @"ok", @"--output-format", @"stream-json", @"--verbose",
+                           @"--max-turns", @"1", @"--tools", @"", @"--no-session-persistence",
+                           @"--model", @"haiku", @"--setting-sources", @"",
+                           @"--strict-mcp-config", @"--disable-slash-commands"];
+        task.currentDirectoryURL = [NSURL fileURLWithPath:NSTemporaryDirectory()];
+        NSPipe *pipe = [NSPipe pipe];
+        task.standardOutput = pipe;
+        task.standardInput = NSFileHandle.fileHandleWithNullDevice;
+        task.standardError = NSFileHandle.fileHandleWithNullDevice;
+        NSError *error = nil;
+        if (![task launchAndReturnError:&error]) { completion(@{@"error": @"FAILED"}); return; }
+        [self setProbePID:task.processIdentifier];
+        __block BOOL timedOut = NO;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(timeout * NSEC_PER_SEC)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            if (task.isRunning) { timedOut = YES; [task terminate]; }
         });
-    };
+        // Collect output as it arrives instead of reading to end-of-file: a
+        // stray grandchild holding the pipe open must not outlive the timeout.
+        NSMutableData *collected = [NSMutableData data];
+        pipe.fileHandleForReading.readabilityHandler = ^(NSFileHandle *handle) {
+            NSData *chunk = handle.availableData;
+            @synchronized (collected) { [collected appendData:chunk]; }
+        };
+        [task waitUntilExit];
+        usleep(100*1000);   // let the last chunk through
+        pipe.fileHandleForReading.readabilityHandler = nil;
+        [self setProbePID:0];
+        NSData *output;
+        @synchronized (collected) { output = [collected copy]; }
+        completion(UsageFromStream(output, timedOut));
+    });
 }
 
 - (void)refreshUsageIfStale {
     double now = NSDate.date.timeIntervalSince1970;
-    double wait = _lastFailed ? 5*60 : 60;
+    double wait = _lastFailed ? 2*60 : 5*60;
     if (_fetching || !_usageFetcher || now - _lastAttempt < wait) return;
     _fetching = YES;
     _lastAttempt = now;
@@ -200,7 +302,12 @@ static NSString *ReadAccessToken(void) {
     _fetching = NO;
     CWWindowRecord five = ParseWindow(usage[@"five_hour"]), seven = ParseWindow(usage[@"seven_day"]);
     _lastFailed = !(five.known || seven.known);
-    if (_lastFailed) return;
+    if (_lastFailed) {
+        NSString *why = [usage[@"error"] isKindOfClass:NSString.class] ? usage[@"error"] : @"";
+        snprintf(_note, sizeof _note, "%s", why.UTF8String);
+        return;
+    }
+    _note[0] = 0;
     _apiFiveHour = five; _apiSevenDay = seven;
     _apiAvailable = YES;
     _apiTime = NSDate.date.timeIntervalSince1970;
@@ -217,6 +324,7 @@ static CWLimitWindow WindowAt(CWWindowRecord record, double now) {
     double now = date.timeIntervalSince1970;
     CWLimits limits = {0};
     limits.loading = _fetching;
+    memcpy(limits.note, _note, sizeof limits.note);
     BOOL useAPI = _apiAvailable && (!_fileAvailable || _apiTime >= _fileTime);
     if (useAPI) {
         limits.available = YES;
@@ -224,6 +332,10 @@ static CWLimitWindow WindowAt(CWWindowRecord record, double now) {
     } else if (_fileAvailable) {
         limits.available = YES;
         limits.fiveHour = WindowAt(_fileFiveHour, now); limits.sevenDay = WindowAt(_fileSevenDay, now);
+    } else if (_historyAvailable) {
+        // Placeholder until a real check lands: percentages, no reset times.
+        limits.available = YES;
+        limits.fiveHour = WindowAt(_historyFiveHour, now); limits.sevenDay = WindowAt(_historySevenDay, now);
     }
     return limits;
 }

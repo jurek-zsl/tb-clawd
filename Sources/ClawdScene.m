@@ -126,6 +126,14 @@ static const char *FontGlyph(char c) {
         case 'M': return "101111111101101"; case '%': return "101001010100101";
         case '-': return "000000111000000"; case '?': return "111001011000010";
         case '.': return "000000000000010";
+        case 'E': return "111100111100111"; case 'X': return "101101010101101";
+        case 'P': return "111101111100100"; case 'I': return "111010010010111";
+        case 'R': return "110101110101101"; case 'N': return "111101101101101";
+        case 'O': return "111101101101111"; case 'L': return "100100100100111";
+        case 'G': return "111100101101111"; case 'F': return "111100111100100";
+        case 'C': return "111100100100111"; case 'A': return "010101111101101";
+        case 'T': return "111010010010010"; case 'U': return "101101101101111";
+        case 'S': return "111100111001111";
         default: return "000000000000000";
     }
 }
@@ -403,7 +411,7 @@ CWScene CWRenderBeat(CWBeat beat, CGFloat width, CWActivity reactionKind, double
                 char dots[4]={0}; int n=1+((int)floor(reactionAge*4))%3;
                 for(int i=0;i<n;i++) dots[i]='.';
                 Text(&s,panelX,round((30-rowH)/2),dots,p,CWInkText);
-            } else Text(&s,panelX,round((30-rowH)/2),"?",p,CWInkText);
+            } else Text(&s,panelX,round((30-rowH)/2),l->note[0]?l->note:"?",p,l->note[0]?CWInkWarn:CWInkText);
         } else {
             LimitsRow(&s,panelX,top,p,withReset,"5H",l->fiveHour);
             LimitsRow(&s,panelX,top+rowH+gap,p,withReset,"7D",l->sevenDay);

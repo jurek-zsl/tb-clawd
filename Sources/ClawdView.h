@@ -11,6 +11,12 @@
 @property(nonatomic, readonly) NSString *liveStateName;
 // Live widget: how remaining limits are fetched (replaceable for tests).
 @property(nonatomic, copy) void (^usageFetcher)(void (^completion)(NSDictionary *usage));
+// Live widget: the claude binary to run for limits (nil = search), the time
+// allowed for one check, and the desktop usage history placeholder file.
+@property(nonatomic, copy) NSString *claudeExecutable;
+@property(nonatomic) NSTimeInterval usageTimeout;
+@property(nonatomic, copy) NSString *historyPath;
+@property(nonatomic, readonly) NSString *limitsNote;
 - (BOOL)showingLimitsAtTime:(NSTimeInterval)time;
 - (void)startAnimation;
 - (void)stopAnimation;

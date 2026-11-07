@@ -17,16 +17,29 @@ extern const NSTimeInterval CWLiveSleepAfter;
 - (instancetype)initWithClaudeDirectory:(NSString *)directory;
 @property(nonatomic, copy) NSString *claudeDirectory;
 @property(nonatomic, readonly) CWLiveState state;
-// Remaining limits: the newest of Claude's usage endpoint (fetched on demand)
-// and the optional status line bridge file.
+// Remaining limits: the newest of a check through the Claude binary (run on
+// demand) and the optional status line bridge file, with the desktop app's
+// usage history as a placeholder.
 - (CWLimits)limitsAtDate:(NSDate *)date;
-// Fetches usage unless a fetch is running or the last one is under a minute
-// old (five minutes after a failure). Results arrive on the main queue.
+// Fetches usage unless a fetch is running or the last one is under five
+// minutes old (two minutes after a failure). Results arrive on the main queue.
 - (void)refreshUsageIfStale;
-// Replaceable for tests. The default reads Claude Code's own sign-in from the
-// Keychain and asks api.anthropic.com/api/oauth/usage; it never refreshes or
-// stores the token. Call completion with the usage JSON, or nil on failure.
+// How limits are fetched. The default asks the Claude Code binary (see
+// ClawdLive.m); tests replace it. Call completion with usage windows
+// ({five_hour: {utilization: percent, resets_at: ...}, seven_day: ...}), or
+// {error: "NO CLAUDE" | "NO LOGIN" | "FAILED" | "NO LIMITS"}.
 @property(nonatomic, copy) void (^usageFetcher)(void (^completion)(NSDictionary *usage));
+// The claude binary to run; nil searches the usual places and the Claude
+// desktop app's bundled copy.
+@property(nonatomic, copy) NSString *claudeExecutable;
+// Seconds before a slow check is stopped (default 25).
+@property(nonatomic) NSTimeInterval usageTimeout;
+// The desktop app's plan-usage-history.json, used until a real check lands.
+// nil means the standard location, but only for the standard ~/.claude.
+@property(nonatomic, copy) NSString *historyPath;
+// Why there are no numbers: "NO CLAUDE", "NO LOGIN", "FAILED", "NO LIMITS", or
+// empty. Cleared by the next successful check.
+@property(nonatomic, readonly) NSString *limitsNote;
 // Re-reads the files at most once a second.
 - (void)pollIfNeeded;
 - (void)poll;

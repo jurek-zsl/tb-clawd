@@ -177,6 +177,13 @@ static const NSTimeInterval ClawdLimitsDuration = 4;
 - (NSString *)claudeDirectory { return _monitor.claudeDirectory; }
 - (void)setUsageFetcher:(void (^)(void (^)(NSDictionary *)))fetcher { _monitor.usageFetcher = fetcher; }
 - (void (^)(void (^)(NSDictionary *)))usageFetcher { return _monitor.usageFetcher; }
+- (void)setClaudeExecutable:(NSString *)path { _monitor.claudeExecutable = path; }
+- (NSString *)claudeExecutable { return _monitor.claudeExecutable; }
+- (void)setUsageTimeout:(NSTimeInterval)seconds { _monitor.usageTimeout = seconds; }
+- (NSTimeInterval)usageTimeout { return _monitor.usageTimeout; }
+- (void)setHistoryPath:(NSString *)path { _monitor.historyPath = path; [_monitor poll]; }
+- (NSString *)historyPath { return _monitor.historyPath; }
+- (NSString *)limitsNote { return _monitor.limitsNote; }
 
 - (BOOL)handleTapAtPoint:(NSPoint)point time:(NSTimeInterval)time width:(CGFloat)width {
     if (_live && [self showingLimitsAtTime:time]) {

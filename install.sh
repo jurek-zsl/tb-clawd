@@ -39,5 +39,5 @@ for NAME in "${NAMES[@]}"; do
 done
 printf 'Quit and reopen Pock, choose Customize Pock…, then drag Clawd or Clawd Live onto your Touch Bar.\n'
 if [[ " ${NAMES[*]} " == *" ClawdLive "* ]]; then
-    printf 'The first tap on Clawd Live asks to read Claude Code-credentials from the Keychain; allow it for limits.\n'
+    printf 'Tap Clawd Live for your limits; it asks the installed Claude Code, so there is no permission prompt.\n'
 fi

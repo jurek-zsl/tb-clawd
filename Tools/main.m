@@ -142,6 +142,121 @@ static BOOL CWSceneHasInk(CWScene scene, CWInk ink) {
     for(NSInteger i=0;i<scene.pixelCount;i++) if(scene.pixels[i].ink==ink) return YES;
     return NO;
 }
+
+// ------------------------------------------------ the claude binary check ---
+
+static NSString *CWWriteScript(NSString *dir, NSString *name, NSString *body) {
+    NSString *path=[dir stringByAppendingPathComponent:name];
+    Require([[@"#!/bin/sh\n" stringByAppendingString:body] writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL],@"write fake claude");
+    chmod(path.fileSystemRepresentation,0755);
+    return path;
+}
+static void CWSpin(double seconds, BOOL (^until)(void)) {
+    NSDate *end=[NSDate dateWithTimeIntervalSinceNow:seconds];
+    while([end timeIntervalSinceNow]>0 && !(until && until()))
+        [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:.03]];
+}
+static void CWTapActor(ClawdView *view, double time, CGFloat width) {
+    CWScene scene=[view sceneAtTime:time width:width];
+    Require([view handleTapAtPoint:NSMakePoint(NSMidX(scene.actorBounds),NSMidY(scene.actorBounds)) time:time width:width],@"tap Clawd");
+}
+static ClawdView *CWFreshLive(Class widgetClass, NSString *dir) {
+    ClawdView *view=[[[widgetClass alloc] init] valueForKey:@"view"];
+    view.claudeDirectory=dir;
+    view.historyPath=@"/nonexistent/plan-usage-history.json";
+    return view;
+}
+static void CheckClaudeBinary(Class widgetClass) {
+    NSString *dir=CWTempClaudeDirectory();
+    setenv("CLAWD_TEST_DIR",dir.fileSystemRepresentation,1);
+    NSString *ok=CWWriteScript(dir,@"claude-ok",[@[
+        @"echo \"$@\" > \"$CLAWD_TEST_DIR/args.txt\"",
+        @"now=$(date +%s)",
+        @"printf '{\"pid\":%s,\"status\":\"busy\",\"statusUpdatedAt\":%s000}' $$ $now > \"$CLAWD_TEST_DIR/sessions/$$.json\"",
+        @"sleep 0.7",
+        @"echo '{\"type\":\"system\",\"subtype\":\"init\"}'",
+        @"printf '{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"allowed\",\"unifiedWindows\":{\"five_hour\":{\"utilization\":0.30,\"resetsAt\":%s},\"seven_day\":{\"utilization\":0.91,\"resetsAt\":%s}}}}\\n' $((now+4800)) $((now+259200))",
+        @"echo '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"ok\"}'",
+        @"rm -f \"$CLAWD_TEST_DIR/sessions/$$.json\""] componentsJoinedByString:@"\n"]);
+    for(NSNumber *widthValue in @[@176,@64]) {
+        CGFloat width=widthValue.doubleValue;
+        ClawdView *view=CWFreshLive(widgetClass,dir);
+        view.claudeExecutable=ok;
+        double clock=10;
+        CWScene scene=CWAdvance(view,&clock,1,width);
+        Require([view.liveStateName isEqual:@"asleep"],@"fixture starts asleep");
+        CWTapActor(view,clock,width);
+        // While the check runs it is a live, busy Claude session on disk. Clawd
+        // must not mistake it for real work.
+        CWSpin(.3,nil);
+        NSString *sessions=[dir stringByAppendingPathComponent:@"sessions"];
+        Require([[NSFileManager.defaultManager contentsOfDirectoryAtPath:sessions error:NULL] count]==1,@"the check registered a busy session while running");
+        view.claudeDirectory=dir;   // force an immediate re-read
+        scene=CWAdvance(view,&clock,.3,width);
+        Require([view.liveStateName isEqual:@"asleep"],@"the widget's own limits check never wakes Clawd");
+        CWSpin(5,^BOOL{ return CWSceneHasInk([view sceneAtTime:10 width:width],CWInkCode); });
+        scene=CWAdvance(view,&clock,.5,width);
+        Require(CWSceneHasInk(scene,CWInkCode) && CWSceneHasInk(scene,CWInkLow),@"limits from the binary's rate_limit_event: 30% used shows green, 91% used shows red");
+        Require(view.limitsNote.length==0,@"success leaves no failure note");
+        NSString *args=[NSString stringWithContentsOfFile:[dir stringByAppendingPathComponent:@"args.txt"] encoding:NSUTF8StringEncoding error:NULL];
+        for(NSString *flag in @[@"-p",@"stream-json",@"--tools",@"--no-session-persistence",@"haiku",@"--setting-sources",@"--strict-mcp-config"])
+            Require([args containsString:flag],[NSString stringWithFormat:@"minimal check runs with %@",flag]);
+        [view handleTapAtPoint:NSMakePoint(1,1) time:clock width:width];
+    }
+
+    // Every way the check can fail names its reason and shows no bars.
+    struct { NSString *name, *body, *note; } failures[]={
+        {@"claude-login",@"echo '{\"type\":\"result\",\"subtype\":\"error\",\"is_error\":true,\"result\":\"Not logged in · Please run /login\"}'\nexit 1",@"NO LOGIN"},
+        {@"claude-nolimits",@"echo '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"ok\"}'",@"NO LIMITS"},
+        {@"claude-garbage",@"echo 'segfault, probably'\nexit 2",@"FAILED"},
+        {@"claude-missing",nil,@"NO CLAUDE"},
+    };
+    for(int i=0;i<4;i++) {
+        ClawdView *view=CWFreshLive(widgetClass,dir);
+        view.claudeExecutable=failures[i].body?CWWriteScript(dir,failures[i].name,failures[i].body):@"/nonexistent/claude";
+        double clock=10;
+        CWAdvance(view,&clock,1,176);
+        CWTapActor(view,clock,176);
+        CWSpin(4,^BOOL{ return view.limitsNote.length>0; });
+        Require([view.limitsNote isEqual:failures[i].note],[NSString stringWithFormat:@"%@ is reported as %@, got %@",failures[i].name,failures[i].note,view.limitsNote]);
+        CWScene scene=CWAdvance(view,&clock,.4,176);
+        Require(CWSceneHasInk(scene,CWInkWarn) && !CWSceneHasInk(scene,CWInkCode) && !CWSceneHasInk(scene,CWInkLow),@"failure shows its reason, not bars");
+    }
+    {
+        // A stuck check is stopped at the timeout and reported, not left running.
+        ClawdView *view=CWFreshLive(widgetClass,dir);
+        view.claudeExecutable=CWWriteScript(dir,@"claude-slow",@"exec sleep 30");
+        view.usageTimeout=.6;
+        double clock=10, started=CFAbsoluteTimeGetCurrent();
+        CWAdvance(view,&clock,1,176);
+        CWTapActor(view,clock,176);
+        CWSpin(5,^BOOL{ return view.limitsNote.length>0; });
+        Require([view.limitsNote isEqual:@"FAILED"] && CFAbsoluteTimeGetCurrent()-started<4,@"a stuck check is stopped at the timeout");
+    }
+    {
+        // The desktop app's history file is a placeholder until a check lands:
+        // percentages without reset times, and only while still meaningful.
+        NSString *history=[dir stringByAppendingPathComponent:@"plan-usage-history.json"];
+        double now=NSDate.date.timeIntervalSince1970*1000;
+        CWWriteJSON(history,@{@"version":@2,@"samples":@[@{@"t":@(now-3*86400000.0),@"org":@"x",@"u":@{@"fh":@99,@"sd":@99}},@{@"t":@(now-600000),@"org":@"x",@"u":@{@"fh":@12,@"sd":@30}}]});
+        ClawdView *view=CWFreshLive(widgetClass,dir);
+        view.historyPath=history;
+        view.usageFetcher=^(void (^done)(NSDictionary *)){ done(@{@"error":@"NO CLAUDE"}); };
+        double clock=10;
+        CWAdvance(view,&clock,1,176);
+        CWTapActor(view,clock,176);
+        CWSpin(1,^BOOL{ return view.limitsNote.length>0; });
+        CWScene scene=CWAdvance(view,&clock,.4,176);
+        Require(CWSceneHasInk(scene,CWInkCode),@"history placeholder shows the newest sample (88% left) even when the check fails");
+        Require(!CWSceneHasInk(scene,CWInkLow),@"an old sample is ignored in favour of the newest");
+        CWWriteJSON(history,@{@"version":@2,@"samples":@[@{@"t":@(now-9*86400000.0),@"org":@"x",@"u":@{@"fh":@5,@"sd":@5}}]});
+        view.historyPath=history;
+        scene=[view sceneAtTime:clock width:176];
+        Require(!CWSceneHasInk(scene,CWInkCode),@"a week-old history sample means nothing and is not shown");
+    }
+    unsetenv("CLAWD_TEST_DIR");
+}
+
 static void CheckLive(Class widgetClass) {
     NSString *dir=CWTempClaudeDirectory();
     for(NSNumber *widthValue in @[@64,@176,@685,@1000]) {
@@ -240,6 +355,25 @@ static void CheckLive(Class widgetClass) {
         }
     }
     {
+        // A failed fetch says why instead of a bare "?": the readout draws the
+        // fetcher's reason in the warning colour, and no reason keeps the "?".
+        id widget=[[widgetClass alloc] init];
+        ClawdView *view=[widget valueForKey:@"view"];
+        CWClearSessions(dir);
+        [[NSFileManager defaultManager] removeItemAtPath:[dir stringByAppendingPathComponent:@"clawd/limits.json"] error:NULL];
+        __block NSString *reason=@"NO LOGIN";
+        view.usageFetcher=^(void (^done)(NSDictionary *)){ done(reason.length?@{@"error":reason}:nil); };
+        view.claudeDirectory=dir;
+        double clock=10;
+        CWScene scene=CWAdvance(view,&clock,1,176);
+        Require([view handleTapAtPoint:NSMakePoint(NSMidX(scene.actorBounds),NSMidY(scene.actorBounds)) time:clock width:176],@"tap with failing fetch");
+        [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:.05]];
+        scene=CWAdvance(view,&clock,.5,176);
+        Require(scene.activity==CWActivityLimits && CWSceneHasInk(scene,CWInkWarn),@"a failure reason is spelled out in the warning colour");
+        Require(!CWSceneHasInk(scene,CWInkCode) && !CWSceneHasInk(scene,CWInkLow),@"no limit bars without data");
+        Require(![view showingLimitsAtTime:clock+4.5] ,@"failure readout still times out");
+    }
+    {
         // Limits from the usage endpoint's JSON shape (utilization + ISO reset).
         id widget=[[widgetClass alloc] init];
         ClawdView *view=[widget valueForKey:@"view"];
@@ -265,6 +399,7 @@ static void CheckLive(Class widgetClass) {
         [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:.05]];
         Require(calls==1,@"repeat taps within a minute reuse the last answer");
     }
+    CheckClaudeBinary(widgetClass);
     [NSFileManager.defaultManager removeItemAtPath:dir error:NULL];
 }
 
@@ -294,7 +429,7 @@ int main(int argc, const char *argv[]) {
             Require(![[otherWidget valueForKey:@"view"] isLive], @"autonomous widget stays autonomous");
             Require(NSEqualSizes([[widget valueForKey:@"imageForCustomization"] size], NSMakeSize(176, 30)), @"live customization image");
             CheckLive(principal);
-            puts("PASS: Clawd Live loads beside Clawd; sessions busy/waiting/idle/stale/dead map to coding, waving, wandering and sleeping with continuous travel; tap shows limits (no data, healthy, low, from file or usage endpoint, throttled) and dismisses; a tapped runner stops in place and runs on from there; widths 64/176/685/1000 fit.");
+            puts("PASS: Clawd Live loads beside Clawd; sessions busy/waiting/idle/stale/dead map to coding, waving, wandering and sleeping with continuous travel; tap shows limits (no data, healthy, low, from the status line file, from a fake claude binary, desktop-history placeholder, throttled) and dismisses; every check failure names its reason; a stuck check is stopped; the check's own session never wakes Clawd; a tapped runner stops in place and runs on from there; widths 64/176/685/1000 fit.");
             return 0;
         }
         if ([mode isEqualToString:@"--check"]) {

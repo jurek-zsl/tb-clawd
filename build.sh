@@ -16,7 +16,7 @@ build_variant() {
     for ARCH in arm64 x86_64; do
         xcrun clang -fobjc-arc -fmodules -Wall -Wextra -Wno-unused-parameter \
             -arch "$ARCH" -mmacosx-version-min=11.0 -O2 -bundle \
-            -framework AppKit -framework QuartzCore -framework Security "$@" \
+            -framework AppKit -framework QuartzCore "$@" \
             "${SOURCES[@]}" -o "$BUILD_DIR/$name-$ARCH"
     done
     xcrun lipo -create "$BUILD_DIR/$name-arm64" "$BUILD_DIR/$name-x86_64" -output "$bundle/Contents/MacOS/$name"

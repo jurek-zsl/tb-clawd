@@ -32,7 +32,9 @@ typedef struct {
 
 // A usage window from Claude Code's status line `rate_limits` payload.
 typedef struct { BOOL known; double usedPercent; double resetsIn; } CWLimitWindow;
-typedef struct { BOOL available, loading; CWLimitWindow fiveHour, sevenDay; } CWLimits;
+// `note` is a short word for why there are no numbers ("EXPIRED", "OFFLINE"...);
+// empty means no reason is known.
+typedef struct { BOOL available, loading; CWLimitWindow fiveHour, sevenDay; char note[12]; } CWLimits;
 
 // All geometry, props, facial acting, rendering and hit testing share this sample.
 CWScene CWSampleScene(double time, CGFloat width, double reactionAge);
