@@ -149,6 +149,17 @@ static void Tap(ClawdView *view, double time, CGFloat width) {
     [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:.02]];
 }
 
+// The time in the live work loop at which `activity` has been going for `age` seconds.
+static double WorkTime(ClawdView *view, CGFloat width, CWActivity activity, double age) {
+    double duration = [view workDurationForWidth:width];
+    for (double t = 0; t < duration; t += .01) {
+        CWScene scene = [view workSceneAtTime:t width:width];
+        if (scene.activity == activity && scene.age >= age) return t;
+    }
+    Fail(@"work station not found");
+    return 0;
+}
+
 // ------------------------------------------------------------- showcase ---
 
 int CWRunShowcase(NSString *output, NSBundle *clawdBundle, NSBundle *liveBundle) {
@@ -182,6 +193,20 @@ int CWRunShowcase(NSString *output, NSBundle *clawdBundle, NSBundle *liveBundle)
             [gif add:frame]; CGImageRelease(frame);
         }
         [gif writeTo:[output stringByAppendingPathComponent:@"mad.gif"]];
+    }
+
+    // 2b. The dance, close up: the stretching slot of the loop while music plays.
+    {
+        CGFloat width = 176;
+        CWGif *gif = [[CWGif alloc] initWithFrameDelay:1/fps];
+        double slot = 3*[clawd journeyDurationForWidth:width]/2 + 18;
+        Crop crop = CenteredCrop([clawd autonomousSceneAtTime:slot + 3 width:width music:YES], width, 100);
+        for (int i = 0; i < 6*fps; i++) {
+            CWScene scene = [clawd autonomousSceneAtTime:slot + i/fps width:width music:YES];
+            CGImageRef frame = Frame(clawd, scene, width, crop, 4, nil, nil);
+            [gif add:frame]; CGImageRelease(frame);
+        }
+        [gif writeTo:[output stringByAppendingPathComponent:@"dance.gif"]];
     }
 
     // 3. Clawd Live, following a scripted Claude Code session.
@@ -219,6 +244,33 @@ int CWRunShowcase(NSString *output, NSBundle *clawdBundle, NSBundle *liveBundle)
         [NSFileManager.defaultManager removeItemAtPath:dir error:NULL];
     }
 
+    // 3b. Clawd Live while Claude keeps working: one lap of the work loop.
+    {
+        CGFloat width = 420;
+        NSString *dir = FixtureDirectory();
+        ClawdView *live = LiveView(liveBundle, dir);
+        CWGif *gif = [[CWGif alloc] initWithFrameDelay:1/fps];
+        double start = 400;
+        [live sceneAtTime:start - 1 width:width];   // asleep at home first
+        SetSession(live, @"busy");
+        double length = 1 + [live journeyDurationForWidth:width]/2 + [live workDurationForWidth:width] + 1;
+        for (int i = 0; i < length*fps; i++) {
+            CWScene scene = [live sceneAtTime:start + i/fps width:width];
+            NSString *detail = nil;
+            switch (scene.underlyingActivity) {
+                case CWActivityCode: detail = @"Clawd types at the laptop"; break;
+                case CWActivityServer: detail = @"he fixes the server"; break;
+                case CWActivityBug: detail = @"he stomps a bug"; break;
+                case CWActivityDuck: detail = @"he explains it to the rubber duck"; break;
+                default: detail = @"he heads for the next job"; break;
+            }
+            CGImageRef frame = Frame(live, scene, width, (Crop){0, width}, 2, @"Claude is working", detail);
+            [gif add:frame]; CGImageRelease(frame);
+        }
+        [gif writeTo:[output stringByAppendingPathComponent:@"work.gif"]];
+        [NSFileManager.defaultManager removeItemAtPath:dir error:NULL];
+    }
+
     // 4. The limits readout, close up.
     {
         CGFloat width = 176;
@@ -250,6 +302,10 @@ int CWRunShowcase(NSString *output, NSBundle *clawdBundle, NSBundle *liveBundle)
         addCell(@"stretch", clawd, CWSampleSceneVia(clawd, 3*run+20.8, width));
         addCell(@"nap", clawd, CWSampleSceneVia(clawd, 4*run+28, width));
         addCell(@"tap: mad", clawd, CWReactionSceneVia(clawd, run/2, width, .7));
+        addCell(@"music: dance", clawd, [clawd autonomousSceneAtTime:3*run + 21 width:width music:YES]);
+        addCell(@"live: server", clawd, [clawd workSceneAtTime:WorkTime(clawd, width, CWActivityServer, 3.3) width:width]);
+        addCell(@"live: bug", clawd, [clawd workSceneAtTime:WorkTime(clawd, width, CWActivityBug, 2.8) width:width]);
+        addCell(@"live: duck", clawd, [clawd workSceneAtTime:WorkTime(clawd, width, CWActivityDuck, 3.2) width:width]);
         NSString *dir = FixtureDirectory();
         ClawdView *live = LiveView(liveBundle, dir);
         SetSession(live, @"waiting");
@@ -260,6 +316,14 @@ int CWRunShowcase(NSString *output, NSBundle *clawdBundle, NSBundle *liveBundle)
         for (; t < 320; t += .05) [live sceneAtTime:t width:width];
         addCell(@"live: working", live, [live sceneAtTime:t width:width]);
         [NSFileManager.defaultManager removeItemAtPath:dir error:NULL];
+        // Loading: three dots while the check is out, never old numbers.
+        NSString *loadingDir = FixtureDirectory();
+        ClawdView *loading = LiveView(liveBundle, loadingDir);
+        loading.usageFetcher = ^(void (^done)(NSDictionary *)) {};
+        [loading sceneAtTime:400 width:width];
+        Tap(loading, 400, width);
+        addCell(@"live: loading", loading, [loading sceneAtTime:400.3 width:width]);
+        [NSFileManager.defaultManager removeItemAtPath:loadingDir error:NULL];
 
         NSInteger cellW = cell*scale, labelH = 26, cellH = 30*scale + labelH, rows = (cells.count + columns - 1)/columns;
         NSBitmapImageRep *sheet = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:NULL pixelsWide:cellW*columns pixelsHigh:cellH*rows bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES isPlanar:NO colorSpaceName:NSDeviceRGBColorSpace bytesPerRow:0 bitsPerPixel:0];

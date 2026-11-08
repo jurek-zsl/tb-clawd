@@ -1,5 +1,6 @@
 #import "ClawdView.h"
 #import "ClawdLive.h"
+#import "ClawdMusic.h"
 #import <QuartzCore/QuartzCore.h>
 #import <math.h>
 
@@ -30,6 +31,14 @@ static const NSTimeInterval ClawdLimitsDuration = 4;
     // pauses the autonomous loop: Clawd stops where he is instead of sliding.
     BOOL _limitsOpen;
     NSTimeInterval _limitsEnd, _liveFrozen, _livePausedTotal;
+    // Tapped while no fresh numbers existed: the readout shows three dots and
+    // stays open until the check lands, then shows the numbers for the usual
+    // time. _limitsShownAt is when that display began.
+    BOOL _limitsAwaiting;
+    NSTimeInterval _limitsShownAt;
+    CFTimeInterval _musicPolled;
+    int _musicHits, _musicMisses;
+    BOOL _musicOn;
 }
 
 - (instancetype)initWithFrame:(NSRect)frame { return [self initWithFrame:frame live:NO]; }
@@ -129,7 +138,12 @@ static const NSTimeInterval ClawdLimitsDuration = 4;
     }
 }
 
-- (void)startAnimation { _wanted = YES; [self updateTimer]; }
+- (void)startAnimation {
+    _wanted = YES;
+    [self updateTimer];
+    // Have the limits ready before the first tap.
+    if (_live) { [_monitor poll]; [_monitor refreshUsageIfStale]; }
+}
 - (void)stopAnimation { _wanted = NO; [self updateTimer]; }
 - (void)setHidden:(BOOL)hidden { [super setHidden:hidden]; [self updateTimer]; }
 - (NSTimeInterval)baseTimeAtTime:(NSTimeInterval)time {
@@ -146,6 +160,25 @@ static const NSTimeInterval ClawdLimitsDuration = 4;
 - (CWScene)autonomousSceneAtTime:(NSTimeInterval)time width:(CGFloat)width reactionAge:(NSTimeInterval)reactionAge {
     return CWSampleScene(time, width, reactionAge);
 }
+- (CWScene)autonomousSceneAtTime:(NSTimeInterval)time width:(CGFloat)width music:(BOOL)music {
+    return CWRenderBeat(CWTimelineBeatMusic(time, width, music), width, CWActivityMad, -1, NULL);
+}
+- (CWScene)workSceneAtTime:(NSTimeInterval)time width:(CGFloat)width {
+    return CWRenderBeat(CWWorkBeat(time, width), width, CWActivityLimits, -1, NULL);
+}
+- (NSTimeInterval)workDurationForWidth:(CGFloat)width { return CWWorkDuration(width); }
+
+- (void)pollMusic {
+    _musicPolled = CFAbsoluteTimeGetCurrent();
+    BOOL heard = _musicDetector ? _musicDetector() : CWSystemAudioIsPlaying();
+    if (heard) { _musicMisses = 0; if (++_musicHits >= 2) _musicOn = YES; }
+    else { _musicHits = 0; if (++_musicMisses >= 4) _musicOn = NO; }
+}
+- (BOOL)musicPlaying {
+    if (_live) return NO;
+    if (CFAbsoluteTimeGetCurrent() - _musicPolled >= 1) [self pollMusic];
+    return _musicOn;
+}
 
 // The live director's clock: wall time minus every readout pause.
 - (NSTimeInterval)liveTimeAtTime:(NSTimeInterval)time {
@@ -160,14 +193,27 @@ static const NSTimeInterval ClawdLimitsDuration = 4;
 - (CWScene)sceneAtTime:(NSTimeInterval)time width:(CGFloat)width {
     if (_live) {
         [_monitor pollIfNeeded];
+        if (_limitsOpen && _limitsAwaiting) {
+            // Keep the three dots up until the check lands, then give the
+            // numbers their full time.
+            if (_monitor.fetching && ![_monitor limitsAtDate:NSDate.date].available) _limitsEnd = time + ClawdLimitsDuration;
+            else {
+                _limitsAwaiting = NO;
+                _limitsShownAt = time - .2;
+                _limitsEnd = _limitsShownAt + ClawdLimitsDuration;
+            }
+        }
         NSTimeInterval liveTime = [self liveTimeAtTime:time];
         CWDirectorUpdate(&_director, _monitor.state, liveTime, width);
         CWLimits limits = [_monitor limitsAtDate:NSDate.date];
         BOOL showing = [self showingLimitsAtTime:time];
-        return CWRenderBeat(CWDirectorBeat(&_director, liveTime, width), width, CWActivityLimits, showing ? time - _limitsTap : -1, &limits);
+        // While waiting the age only cycles, so the dots keep stepping and the
+        // readout never reaches its closing frames.
+        NSTimeInterval age = _limitsAwaiting ? .2 + fmod(time - _limitsTap, 3) : time - _limitsShownAt;
+        return CWRenderBeat(CWDirectorBeat(&_director, liveTime, width), width, CWActivityLimits, showing ? age : -1, &limits);
     }
     NSTimeInterval base = [self baseTimeAtTime:time];
-    return CWSampleScene(base, width, _reacting ? time - _reactionLastTap : -1);
+    return CWRenderBeat(CWTimelineBeatMusic(base, width, [self musicPlaying]), width, CWActivityMad, _reacting ? time - _reactionLastTap : -1, NULL);
 }
 
 - (BOOL)isLive { return _live; }
@@ -181,14 +227,13 @@ static const NSTimeInterval ClawdLimitsDuration = 4;
 - (NSString *)claudeExecutable { return _monitor.claudeExecutable; }
 - (void)setUsageTimeout:(NSTimeInterval)seconds { _monitor.usageTimeout = seconds; }
 - (NSTimeInterval)usageTimeout { return _monitor.usageTimeout; }
-- (void)setHistoryPath:(NSString *)path { _monitor.historyPath = path; [_monitor poll]; }
-- (NSString *)historyPath { return _monitor.historyPath; }
 - (NSString *)limitsNote { return _monitor.limitsNote; }
 
 - (BOOL)handleTapAtPoint:(NSPoint)point time:(NSTimeInterval)time width:(CGFloat)width {
     if (_live && [self showingLimitsAtTime:time]) {
         // Any tap on the strip puts the readout away again.
         _limitsEnd = time;
+        _limitsAwaiting = NO;
         self.needsDisplay = YES;
         return YES;
     }
@@ -196,11 +241,12 @@ static const NSTimeInterval ClawdLimitsDuration = 4;
     if (!CWSceneHitsActor(current, point)) return NO;
     if (_live) {
         _liveFrozen = [self liveTimeAtTime:time];
-        _limitsTap = time;
+        _limitsTap = _limitsShownAt = time;
         _limitsEnd = time + ClawdLimitsDuration;
         _limitsOpen = YES;
         [_monitor poll];
         [_monitor refreshUsageIfStale];
+        _limitsAwaiting = _monitor.fetching && ![_monitor limitsAtDate:NSDate.date].available;
         self.needsDisplay = YES;
         return YES;
     }
@@ -289,6 +335,8 @@ static NSColor *Ink(CWInk ink) {
         case CWInkTrack:return [NSColor colorWithSRGBRed:.22 green:.22 blue:.22 alpha:1];
         case CWInkWarn:return [NSColor colorWithSRGBRed:.95 green:.71 blue:.30 alpha:1];
         case CWInkLow:return [NSColor colorWithSRGBRed:.90 green:.33 blue:.30 alpha:1];
+        case CWInkNote:return [NSColor colorWithSRGBRed:.72 green:.62 blue:.95 alpha:1];
+        case CWInkDuck:return [NSColor colorWithSRGBRed:.98 green:.84 blue:.28 alpha:1];
         default:return [NSColor colorWithSRGBRed:215/255.0 green:119/255.0 blue:87/255.0 alpha:1];
     }
 }

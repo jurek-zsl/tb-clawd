@@ -163,7 +163,6 @@ static void CWTapActor(ClawdView *view, double time, CGFloat width) {
 static ClawdView *CWFreshLive(Class widgetClass, NSString *dir) {
     ClawdView *view=[[[widgetClass alloc] init] valueForKey:@"view"];
     view.claudeDirectory=dir;
-    view.historyPath=@"/nonexistent/plan-usage-history.json";
     return view;
 }
 static void CheckClaudeBinary(Class widgetClass) {
@@ -180,6 +179,7 @@ static void CheckClaudeBinary(Class widgetClass) {
         @"rm -f \"$CLAWD_TEST_DIR/sessions/$$.json\""] componentsJoinedByString:@"\n"]);
     for(NSNumber *widthValue in @[@176,@64]) {
         CGFloat width=widthValue.doubleValue;
+        CWClearSessions(dir);
         ClawdView *view=CWFreshLive(widgetClass,dir);
         view.claudeExecutable=ok;
         double clock=10;
@@ -234,25 +234,22 @@ static void CheckClaudeBinary(Class widgetClass) {
         Require([view.limitsNote isEqual:@"FAILED"] && CFAbsoluteTimeGetCurrent()-started<4,@"a stuck check is stopped at the timeout");
     }
     {
-        // The desktop app's history file is a placeholder until a check lands:
-        // percentages without reset times, and only while still meaningful.
-        NSString *history=[dir stringByAppendingPathComponent:@"plan-usage-history.json"];
-        double now=NSDate.date.timeIntervalSince1970*1000;
-        CWWriteJSON(history,@{@"version":@2,@"samples":@[@{@"t":@(now-3*86400000.0),@"org":@"x",@"u":@{@"fh":@99,@"sd":@99}},@{@"t":@(now-600000),@"org":@"x",@"u":@{@"fh":@12,@"sd":@30}}]});
+        // The check stops as soon as Claude Code has reported the limits, instead
+        // of waiting for the whole reply.
+        CWClearSessions(dir);
         ClawdView *view=CWFreshLive(widgetClass,dir);
-        view.historyPath=history;
-        view.usageFetcher=^(void (^done)(NSDictionary *)){ done(@{@"error":@"NO CLAUDE"}); };
-        double clock=10;
+        view.claudeExecutable=CWWriteScript(dir,@"claude-lingers",[@[
+            @"now=$(date +%s)",
+            @"echo '{\"type\":\"system\",\"subtype\":\"init\"}'",
+            @"printf '{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"unifiedWindows\":{\"five_hour\":{\"utilization\":0.5,\"resetsAt\":%s},\"seven_day\":{\"utilization\":0.1,\"resetsAt\":%s}}}}\\n' $((now+3600)) $((now+86400))",
+            @"exec sleep 20"] componentsJoinedByString:@"\n"]);
+        double clock=10, started=CFAbsoluteTimeGetCurrent();
         CWAdvance(view,&clock,1,176);
         CWTapActor(view,clock,176);
-        CWSpin(1,^BOOL{ return view.limitsNote.length>0; });
-        CWScene scene=CWAdvance(view,&clock,.4,176);
-        Require(CWSceneHasInk(scene,CWInkCode),@"history placeholder shows the newest sample (88% left) even when the check fails");
-        Require(!CWSceneHasInk(scene,CWInkLow),@"an old sample is ignored in favour of the newest");
-        CWWriteJSON(history,@{@"version":@2,@"samples":@[@{@"t":@(now-9*86400000.0),@"org":@"x",@"u":@{@"fh":@5,@"sd":@5}}]});
-        view.historyPath=history;
-        scene=[view sceneAtTime:clock width:176];
-        Require(!CWSceneHasInk(scene,CWInkCode),@"a week-old history sample means nothing and is not shown");
+        id monitor=[view valueForKey:@"monitor"];
+        CWSpin(8,^BOOL{ return ![[monitor valueForKey:@"fetching"] boolValue]; });
+        Require(CFAbsoluteTimeGetCurrent()-started<4,@"the check ends as soon as the limits event arrives, not when the reply ends");
+        Require(CWSceneHasInk([view sceneAtTime:clock+.1 width:176],CWInkCode),@"and its numbers are shown");
     }
     unsetenv("CLAWD_TEST_DIR");
 }
@@ -275,7 +272,7 @@ static void CheckLive(Class widgetClass) {
         Require(fabs(scene.anchorX-[view anchorMinForWidth:width])<.01,@"sleeps at home");
 
         CWWriteSession(dir,getpid(),@"busy",0); view.claudeDirectory=dir;
-        scene=CWAdvance(view,&clock,20,width);
+        scene=CWAdvance(view,&clock,[view journeyDurationForWidth:width]/2+4,width);   // there, and a few seconds into coding
         Require([view.liveStateName isEqual:@"working"],@"busy session reads as working");
         Require(scene.activity==CWActivityCode && fabs(scene.anchorX-[view anchorMaxForWidth:width])<.01,@"working: Clawd runs to the laptop and codes");
         Require(CWSceneHasInk(scene,CWInkLaptop),@"working shows the laptop");
@@ -336,6 +333,7 @@ static void CheckLive(Class widgetClass) {
         Require(scene.activity==CWActivityRun && scene.travelledDistance>10,@"idle Clawd is running");
         double where=scene.anchorX;
         Require([view handleTapAtPoint:NSMakePoint(NSMidX(scene.actorBounds),NSMidY(scene.actorBounds)) time:clock width:width],@"tap the running Clawd");
+        [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:.05]];   // the (empty) check answers
         for(int i=0;i<110;i++) {
             scene=CWAdvance(view,&clock,1.0/30,width);
             Require(scene.activity==CWActivityLimits && fabs(scene.anchorX-where)<.01,@"Clawd stands still while the readout is open");
@@ -399,6 +397,110 @@ static void CheckLive(Class widgetClass) {
         [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:.05]];
         Require(calls==1,@"repeat taps within a minute reuse the last answer");
     }
+    {
+        // Waiting for a check shows three dots, never old numbers, and stays up
+        // until the answer lands; then the numbers get their full time.
+        id widget=[[widgetClass alloc] init];
+        ClawdView *view=[widget valueForKey:@"view"];
+        CWClearSessions(dir);
+        NSString *limitsFile=[dir stringByAppendingPathComponent:@"clawd/limits.json"];
+        CWWriteJSON(limitsFile,@{@"rate_limits":@{@"five_hour":@{@"used_percentage":@20},@"seven_day":@{@"used_percentage":@30}}});
+        [NSFileManager.defaultManager setAttributes:@{NSFileModificationDate:[NSDate dateWithTimeIntervalSinceNow:-600]} ofItemAtPath:limitsFile error:NULL];
+        __block void (^answer)(NSDictionary *)=nil;
+        view.usageFetcher=^(void (^done)(NSDictionary *)){ answer=[done copy]; };
+        view.claudeDirectory=dir;
+        double clock=10;
+        CWAdvance(view,&clock,1,176);
+        CWTapActor(view,clock,176);
+        CWScene scene=CWAdvance(view,&clock,.5,176);
+        Require(scene.activity==CWActivityLimits && answer!=nil,@"tap starts a check and opens the readout");
+        Require(!CWSceneHasInk(scene,CWInkCode) && !CWSceneHasInk(scene,CWInkLow) && !CWSceneHasInk(scene,CWInkWarn),@"a reading older than five minutes is not shown while a new one is on its way");
+        int dots=0, lit=0;
+        for(NSInteger i=0;i<scene.pixelCount;i++) {
+            if(scene.pixels[i].ink==CWInkText) lit++;
+            if(scene.pixels[i].ink==CWInkText || scene.pixels[i].ink==CWInkSteam) dots++;
+        }
+        Require(dots==3 && lit==1,@"loading is three dots, one of them lit");
+        scene=CWAdvance(view,&clock,7,176);
+        Require(scene.activity==CWActivityLimits && !CWSceneHasInk(scene,CWInkCode),@"the readout waits for the check instead of timing out on dots");
+        NSString *reset=[[NSISO8601DateFormatter new] stringFromDate:[NSDate dateWithTimeIntervalSinceNow:2*3600]];
+        answer(@{@"five_hour":@{@"utilization":@40,@"resets_at":reset},@"seven_day":@{@"utilization":@10,@"resets_at":reset}});
+        [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:.05]];
+        scene=CWAdvance(view,&clock,.5,176);
+        Require(CWSceneHasInk(scene,CWInkCode) && scene.activity==CWActivityLimits,@"the numbers replace the dots");
+        scene=CWAdvance(view,&clock,3,176);
+        Require(scene.activity==CWActivityLimits,@"the numbers stay for about four seconds after they land");
+        scene=CWAdvance(view,&clock,1,176);
+        Require(scene.activity!=CWActivityLimits,@"then he puts them away");
+    }
+    {
+        // While Claude Code is in use the limits are fetched ahead of any tap,
+        // and again right after a turn finishes, so a tap shows numbers at once.
+        id widget=[[widgetClass alloc] init];
+        ClawdView *view=[widget valueForKey:@"view"];
+        CWClearSessions(dir);
+        [[NSFileManager defaultManager] removeItemAtPath:[dir stringByAppendingPathComponent:@"clawd/limits.json"] error:NULL];
+        __block int calls=0;
+        NSString *reset=[[NSISO8601DateFormatter new] stringFromDate:[NSDate dateWithTimeIntervalSinceNow:2*3600]];
+        view.usageFetcher=^(void (^done)(NSDictionary *)){
+            calls++;
+            done(@{@"five_hour":@{@"utilization":@40,@"resets_at":reset},@"seven_day":@{@"utilization":@10,@"resets_at":reset}});
+        };
+        view.claudeDirectory=dir;
+        double clock=10;
+        CWAdvance(view,&clock,1,176);
+        Require(calls==0,@"no Claude Code running: no background checks");
+        CWWriteSession(dir,getpid(),@"busy",0); view.claudeDirectory=dir;
+        [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:.05]];
+        Require(calls==1,@"Claude Code in use: the limits are fetched before anyone taps");
+        CWScene scene=CWAdvance(view,&clock,1,176);
+        CWTapActor(view,clock,176);
+        scene=CWAdvance(view,&clock,.3,176);
+        Require(scene.activity==CWActivityLimits && CWSceneHasInk(scene,CWInkCode),@"the tap shows numbers at once, no dots");
+        Require(calls==1,@"and does not fetch again");
+        [view handleTapAtPoint:NSMakePoint(1,1) time:clock width:176];
+        id monitor=[view valueForKey:@"monitor"];
+        double now=NSDate.date.timeIntervalSince1970;
+        [monitor setValue:@(now-100) forKey:@"lastAttempt"];
+        view.claudeDirectory=dir;
+        Require(calls==1,@"fresh enough numbers are left alone");
+        [monitor setValue:@(now-300) forKey:@"lastAttempt"];
+        view.claudeDirectory=dir;
+        [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:.05]];
+        Require(calls==2,@"numbers over four minutes old are refreshed in the background");
+        [monitor setValue:@(now-60) forKey:@"lastAttempt"];
+        CWWriteSession(dir,getpid(),@"idle",0); view.claudeDirectory=dir;
+        [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:.05]];
+        Require(calls==3,@"a finished turn refreshes the numbers, which is when they change");
+    }
+    for(NSNumber *widthValue in @[@64,@176,@685,@1000]) {
+        // While Claude works Clawd leaves the laptop: server rack, bug and rubber
+        // duck in turn, running between them. Always continuous.
+        CGFloat width=widthValue.doubleValue;
+        id widget=[[widgetClass alloc] init];
+        ClawdView *view=[widget valueForKey:@"view"];
+        view.usageFetcher=^(void (^done)(NSDictionary *)){ done(nil); };
+        CWClearSessions(dir);
+        CWWriteSession(dir,getpid(),@"busy",0); view.claudeDirectory=dir;
+        double clock=10;
+        NSMutableSet<NSNumber *> *seen=[NSMutableSet set];
+        double end=clock+[view journeyDurationForWidth:width]/2+[view workDurationForWidth:width]+6;
+        CWScene scene;
+        while(clock<end) {
+            scene=CWAdvance(view,&clock,1.0/30,width);
+            [seen addObject:@(scene.activity)];
+            if(scene.activity==CWActivityServer) Require(CWSceneHasInk(scene,CWInkLaptop) || scene.age<.5 || scene.age>9,@"the server rack stands next to him");
+            if(scene.activity==CWActivityDuck && scene.age>2 && scene.age<7.5) Require(CWSceneHasInk(scene,CWInkDuck),@"the rubber duck is out");
+        }
+        for(NSNumber *activity in @[@(CWActivityCode),@(CWActivityServer),@(CWActivityBug),@(CWActivityDuck),@(CWActivityRun)])
+            Require([seen containsObject:activity],[NSString stringWithFormat:@"working visits every station (missing %@ at %g)",activity,width]);
+        // Stopping work mid-station finishes the action and moves on.
+        for(int i=0;i<30*120 && scene.activity!=CWActivityBug;i++) scene=CWAdvance(view,&clock,1.0/30,width);
+        Require(scene.activity==CWActivityBug,@"reached the bug");
+        CWWriteSession(dir,getpid(),@"idle",0); view.claudeDirectory=dir;
+        scene=CWAdvance(view,&clock,3.5,width);
+        Require([view.liveStateName isEqual:@"idle"] && scene.activity!=CWActivityBug,@"stopping work lets him finish and leave the station");
+    }
     CheckClaudeBinary(widgetClass);
     [NSFileManager.defaultManager removeItemAtPath:dir error:NULL];
 }
@@ -429,7 +531,7 @@ int main(int argc, const char *argv[]) {
             Require(![[otherWidget valueForKey:@"view"] isLive], @"autonomous widget stays autonomous");
             Require(NSEqualSizes([[widget valueForKey:@"imageForCustomization"] size], NSMakeSize(176, 30)), @"live customization image");
             CheckLive(principal);
-            puts("PASS: Clawd Live loads beside Clawd; sessions busy/waiting/idle/stale/dead map to coding, waving, wandering and sleeping with continuous travel; tap shows limits (no data, healthy, low, from the status line file, from a fake claude binary, desktop-history placeholder, throttled) and dismisses; every check failure names its reason; a stuck check is stopped; the check's own session never wakes Clawd; a tapped runner stops in place and runs on from there; widths 64/176/685/1000 fit.");
+            puts("PASS: Clawd Live loads beside Clawd; sessions busy/waiting/idle/stale/dead map to coding, waving, wandering and sleeping with continuous travel; working visits the laptop, server rack, bug and rubber duck; tap shows limits (three dots while loading and never stale numbers, no data, healthy, low, from the status line file, from a fake claude binary that is stopped once the limits arrive, throttled, kept warm in the background) and dismisses; every check failure names its reason; a stuck check is stopped; the check's own session never wakes Clawd; a tapped runner stops in place and runs on from there; widths 64/176/685/1000 fit.");
             return 0;
         }
         if ([mode isEqualToString:@"--check"]) {
@@ -489,6 +591,71 @@ int main(int argc, const char *argv[]) {
                 NSArray *names=@[@"coding",@"coffee",@"stretching",@"napping"];
                 double actionTimes[]={run+3,2*run+13,3*run+21,4*run+27};
                 for(int i=0;i<4;i++) Require([[actorView activityNameAtTime:actionTimes[i] width:width] isEqual:names[i]], @"all autonomous activities scheduled");
+                for(int sample=0;sample<240;sample++) {
+                    CWScene scene=[actorView autonomousSceneAtTime:sample*period/240 width:width music:YES];
+                    Require(scene.pixelCount>0 && scene.pixelCount<256,@"complete pose while music plays");
+                    for(NSInteger i=0;i<scene.pixelCount;i++) {
+                        NSRect pixel=scene.pixels[i].rect;
+                        Require(NSMinX(pixel)>=0 && NSMaxX(pixel)<=width && NSMinY(pixel)>=0 && NSMaxY(pixel)<=30,@"dance and notes fit the strip");
+                    }
+                }
+                for(int i=0;i<8;i++) {
+                    CWScene before=[actorView autonomousSceneAtTime:boundaries[i]-.00001 width:width music:YES];
+                    CWScene after=[actorView autonomousSceneAtTime:boundaries[i]+.00001 width:width music:YES];
+                    Require(fabs(before.anchorX-after.anchorX)<.01,@"music timeline anchors continuous at every boundary");
+                }
+                CWScene stretching=[actorView autonomousSceneAtTime:3*run+21 width:width music:NO];
+                CWScene dancing=[actorView autonomousSceneAtTime:3*run+21 width:width music:YES];
+                CWScene napDancing=[actorView autonomousSceneAtTime:4*run+29 width:width music:YES];
+                Require(stretching.activity==CWActivityStretch && dancing.activity==CWActivityDance && napDancing.activity==CWActivityDance,@"with music, stretching and napping become dancing");
+                Require(CWSceneHasInk(dancing,CWInkNote) && !CWSceneHasInk(stretching,CWInkNote),@"dancing has music notes");
+                Require(fabs(dancing.anchorX-stretching.anchorX)<.01 && fabs(dancing.baseTime-stretching.baseTime)<.01,@"switching to dancing keeps place and clock");
+                NSMutableSet<NSString *> *moves=[NSMutableSet set];
+                for(int k=0;k<8;k++) {
+                    CWScene step=[actorView autonomousSceneAtTime:3*run+19.05+k*.25 width:width music:YES];
+                    NSMutableString *signature=[NSMutableString string];
+                    for(NSInteger i=0;i<step.pixelCount;i++) if(step.pixels[i].actor) [signature appendString:NSStringFromRect(step.pixels[i].rect)];
+                    [moves addObject:signature];
+                }
+                Require(moves.count>=6,@"the dance changes pose on every beat");
+                // A poke interrupts the dance in place, like any other activity.
+                ClawdView *dancer=[[principal alloc] init] ? [[[principal alloc] init] valueForKey:@"view"] : nil;
+                dancer.musicDetector=^BOOL{ return YES; };
+                [dancer pollMusic]; [dancer pollMusic];
+                double danceTime=3*run+21;
+                CWScene dancingNow=[dancer sceneAtTime:danceTime width:width];
+                Require(dancer.musicPlaying && dancingNow.activity==CWActivityDance,@"a view that hears music dances at the stretching slot");
+                Require([dancer handleTapAtPoint:NSMakePoint(NSMidX(dancingNow.actorBounds),NSMidY(dancingNow.actorBounds)) time:danceTime width:width],@"poke the dancer");
+                CWScene dancerMad=[dancer sceneAtTime:danceTime+.5 width:width];
+                Require(dancerMad.activity==CWActivityMad && fabs(dancerMad.anchorX-dancingNow.anchorX)<.01 && !CWSceneHasInk(dancerMad,CWInkNote),@"a poked dancer stops where he stands, without notes");
+                // The work loop that live Clawd follows while Claude is busy.
+                {
+                    double loop=[actorView workDurationForWidth:width];
+                    NSMutableSet<NSNumber *> *seen=[NSMutableSet set];
+                    NSMutableDictionary<NSNumber *, NSMutableSet<NSNumber *> *> *inks=[NSMutableDictionary dictionary];
+                    CWScene start=[actorView workSceneAtTime:3 width:width];
+                    Require(start.activity==CWActivityCode && fabs(start.anchorX-[actorView anchorMaxForWidth:width])<.01,@"the work loop starts at the laptop");
+                    for(int i=0;i<=loop*20;i++) {
+                        CWScene scene=[actorView workSceneAtTime:i/20.0 width:width];
+                        CWScene next=[actorView workSceneAtTime:(i+1)/20.0 width:width];
+                        Require(scene.pixelCount>0 && scene.pixelCount<256,@"work pose within budget");
+                        Require(fabs(next.anchorX-scene.anchorX)<=4,@"work loop never jumps");
+                        for(NSInteger p=0;p<scene.pixelCount;p++) {
+                            NSRect pixel=scene.pixels[p].rect;
+                            Require(NSMinX(pixel)>=0 && NSMaxX(pixel)<=width && NSMinY(pixel)>=0 && NSMaxY(pixel)<=30,@"work props fit the strip");
+                            NSMutableSet *set=inks[@(scene.activity)];
+                            if(!set) inks[@(scene.activity)]=set=[NSMutableSet set];
+                            [set addObject:@(scene.pixels[p].ink)];
+                        }
+                        [seen addObject:@(scene.activity)];
+                    }
+                    Require(fabs([actorView workSceneAtTime:loop-.0001 width:width].anchorX-[actorView workSceneAtTime:0 width:width].anchorX)<.5,@"the work loop closes without a jump");
+                    for(NSNumber *activity in @[@(CWActivityCode),@(CWActivityServer),@(CWActivityBug),@(CWActivityDuck),@(CWActivityRun)])
+                        Require([seen containsObject:activity],@"work loop visits every station");
+                    Require([inks[@(CWActivityServer)] containsObject:@(CWInkLaptop)] && [inks[@(CWActivityServer)] containsObject:@(CWInkCode)] && [inks[@(CWActivityServer)] containsObject:@(CWInkLow)],@"server rack with a red light that turns green");
+                    Require([inks[@(CWActivityBug)] containsObject:@(CWInkLow)],@"a bug");
+                    Require([inks[@(CWActivityDuck)] containsObject:@(CWInkDuck)] && [inks[@(CWActivityDuck)] containsObject:@(CWInkText)] && [inks[@(CWActivityDuck)] containsObject:@(CWInkWarn)],@"a rubber duck, a speech bubble and an idea");
+                }
                 if (width >= 685) {
                     CWScene first=[actorView autonomousSceneAtTime:1 width:width];
                     CWScene second=[actorView autonomousSceneAtTime:2 width:width];
@@ -572,8 +739,25 @@ int main(int argc, const char *argv[]) {
                 }
                 Require(foundProp,@"coffee has a held cup");
             }
+            {
+                // Music detection: on after two positive readings, off after four
+                // negative ones, so a gap between tracks does not stop the dance.
+                ClawdView *listener=[[[principal alloc] init] valueForKey:@"view"];
+                __block BOOL heard=YES;
+                listener.musicDetector=^BOOL{ return heard; };
+                [listener pollMusic];
+                Require(!listener.musicPlaying,@"one reading is not music yet");
+                [listener pollMusic];
+                Require(listener.musicPlaying,@"two readings are");
+                heard=NO;
+                for(int i=0;i<3;i++) [listener pollMusic];
+                Require(listener.musicPlaying,@"a short silence keeps the dance going");
+                [listener pollMusic];
+                Require(!listener.musicPlaying,@"four silent readings end it");
+                Require([listener autonomousSceneAtTime:3*[listener journeyDurationForWidth:176]/2+21 width:176].activity==CWActivityStretch,@"no music: back to stretching");
+            }
             CheckTouchDelivery(view.class);
-            puts("PASS: direct Touch Bar responder delivery, x-only finger targeting, indirect/blank/prop filtering, duplicate mouse suppression; activities, actor-only hits, anchored mad pause/resume/repeated taps; actual PockKit conformance, flexible widths64/176/685/1000, full travel, stable speed, customization, lifecycle, clock, sleep/wake, accessibility, release.");
+            puts("PASS: music makes stretching and napping into dancing with notes (debounced detection, a poke stops the dance in place); the live work loop visits laptop, server rack, bug and duck within the strip; direct Touch Bar responder delivery, x-only finger targeting, indirect/blank/prop filtering, duplicate mouse suppression; activities, actor-only hits, anchored mad pause/resume/repeated taps; actual PockKit conformance, flexible widths64/176/685/1000, full travel, stable speed, customization, lifecycle, clock, sleep/wake, accessibility, release.");
             return 0;
         }
         NSURL *executable = [NSURL fileURLWithPath:@(argv[0])].URLByStandardizingPath;

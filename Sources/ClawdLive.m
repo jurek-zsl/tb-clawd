@@ -5,6 +5,12 @@
 #import <unistd.h>
 
 const NSTimeInterval CWLiveSleepAfter = 5*60;
+// Numbers older than this are not shown; a check replaces them.
+static const double kLimitsFresh = 5*60;
+// While Claude Code is active the readout is kept warm so a tap never waits:
+// a check every four minutes, and one shortly after each finished turn, which
+// is when the numbers actually move.
+static const double kWarmEvery = 4*60, kAfterTurn = 45, kRetryAfterFailure = 2*60;
 
 NSString *CWLiveStateName(CWLiveState state) {
     switch (state) {
@@ -27,11 +33,9 @@ typedef struct { BOOL known; double used; double resetsAt; } CWWindowRecord;
     CWWindowRecord _fileFiveHour, _fileSevenDay;
     // From asking the Claude Code binary (see runClaudeUsage:).
     BOOL _apiAvailable, _fetching, _lastFailed;
+    CWLiveState _previousState;
     double _apiTime, _lastAttempt;
     CWWindowRecord _apiFiveHour, _apiSevenDay;
-    // From the Claude desktop app's own history file: percentages only.
-    BOOL _historyAvailable;
-    CWWindowRecord _historyFiveHour, _historySevenDay;
     char _note[12];
     pid_t _probePID;    // the claude process this monitor started, if any
 }
@@ -121,6 +125,7 @@ static CWWindowRecord ParseWindow(id value) {
             if (!isnan(updated) && nowMs - updated < CWLiveSleepAfter * 1000) recent = YES;
         }
     }
+    _previousState = _state;
     _state = waiting ? CWLiveWaiting : busy ? CWLiveWorking : recent ? CWLiveIdle : CWLiveAsleep;
 
     NSString *limitsPath = [[_claudeDirectory stringByAppendingPathComponent:@"clawd"] stringByAppendingPathComponent:@"limits.json"];
@@ -137,45 +142,15 @@ static CWWindowRecord ParseWindow(id value) {
             _fileTime = modified ? modified.timeIntervalSince1970 : 0;
         }
     }
-    [self loadHistory];
+    // Keep the readout ready while Claude Code is in use.
+    BOOL finishedTurn = (_previousState == CWLiveWorking || _previousState == CWLiveWaiting) && _state == CWLiveIdle;
+    if (finishedTurn) [self fetchUsageIfQuietFor:kAfterTurn];
+    else if (_state != CWLiveAsleep) [self fetchUsageIfQuietFor:kWarmEvery];
 }
 
 - (NSString *)limitsNote { return [NSString stringWithUTF8String:_note]; }
 - (pid_t)probePID { @synchronized (self) { return _probePID; } }
 - (void)setProbePID:(pid_t)pid { @synchronized (self) { _probePID = pid; } }
-
-// The Claude desktop app records plan usage as it checks it: {"samples":[{"t":
-// ms, "org":..., "u":{"fh": 5-hour %, "sd": 7-day %}}]}. No credentials, but
-// also no reset times, and it only updates when the app asks. It is shown
-// only until a real check lands. A sample older than its window means nothing.
-- (NSString *)effectiveHistoryPath {
-    if (_historyPath) return _historyPath;
-    NSString *home = [NSHomeDirectory() stringByAppendingPathComponent:@".claude"];
-    if (![_claudeDirectory isEqualToString:home]) return nil;
-    return [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Application Support/Claude/plan-usage-history.json"];
-}
-
-- (void)loadHistory {
-    _historyAvailable = NO;
-    NSString *path = [self effectiveHistoryPath];
-    NSData *data = path.length ? [NSData dataWithContentsOfFile:path] : nil;
-    id json = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL] : nil;
-    NSArray *samples = [json isKindOfClass:NSDictionary.class] ? json[@"samples"] : nil;
-    if (![samples isKindOfClass:NSArray.class]) return;
-    NSDictionary *newest = nil; double newestTime = -1;
-    for (id sample in samples) {
-        if (![sample isKindOfClass:NSDictionary.class]) continue;
-        double when = ParseTime(sample[@"t"]);
-        if (!isnan(when) && when > newestTime) { newest = sample; newestTime = when; }
-    }
-    NSDictionary *used = [newest[@"u"] isKindOfClass:NSDictionary.class] ? newest[@"u"] : nil;
-    if (!used) return;
-    double age = NSDate.date.timeIntervalSince1970 - newestTime;
-    double five = Number(used[@"fh"]), seven = Number(used[@"sd"]);
-    _historyFiveHour = (CWWindowRecord){!isnan(five) && age < 5*3600, isnan(five) ? 0 : five, NAN};
-    _historySevenDay = (CWWindowRecord){!isnan(seven) && age < 7*86400, isnan(seven) ? 0 : seven, NAN};
-    _historyAvailable = _historyFiveHour.known || _historySevenDay.known;
-}
 
 // ---------------------------------------------------------- usage fetch ---
 
@@ -269,9 +244,17 @@ static NSDictionary *UsageFromStream(NSData *output, BOOL timedOut) {
         // Collect output as it arrives instead of reading to end-of-file: a
         // stray grandchild holding the pipe open must not outlive the timeout.
         NSMutableData *collected = [NSMutableData data];
+        NSData *marker = [@"\"rate_limit_event\"" dataUsingEncoding:NSUTF8StringEncoding], *newline = [@"\n" dataUsingEncoding:NSUTF8StringEncoding];
         pipe.fileHandleForReading.readabilityHandler = ^(NSFileHandle *handle) {
             NSData *chunk = handle.availableData;
-            @synchronized (collected) { [collected appendData:chunk]; }
+            @synchronized (collected) {
+                [collected appendData:chunk];
+                // The limits are all we want: once their line is complete, stop.
+                NSRange found = [collected rangeOfData:marker options:0 range:NSMakeRange(0, collected.length)];
+                if (found.location != NSNotFound && task.isRunning &&
+                    [collected rangeOfData:newline options:0 range:NSMakeRange(NSMaxRange(found), collected.length - NSMaxRange(found))].location != NSNotFound)
+                    [task terminate];
+            }
         };
         [task waitUntilExit];
         usleep(100*1000);   // let the last chunk through
@@ -283,9 +266,15 @@ static NSDictionary *UsageFromStream(NSData *output, BOOL timedOut) {
     });
 }
 
-- (void)refreshUsageIfStale {
+- (void)refreshUsageIfStale { [self fetchUsageIfQuietFor:5*60]; }
+
+- (BOOL)isFetching { return _fetching; }
+
+// Starts a check unless one is running or the last one began less than `gap`
+// seconds ago (never sooner than two minutes after a failure).
+- (void)fetchUsageIfQuietFor:(double)gap {
     double now = NSDate.date.timeIntervalSince1970;
-    double wait = _lastFailed ? 2*60 : 5*60;
+    double wait = _lastFailed ? fmax(gap, kRetryAfterFailure) : gap;
     if (_fetching || !_usageFetcher || now - _lastAttempt < wait) return;
     _fetching = YES;
     _lastAttempt = now;
@@ -325,17 +314,15 @@ static CWLimitWindow WindowAt(CWWindowRecord record, double now) {
     CWLimits limits = {0};
     limits.loading = _fetching;
     memcpy(limits.note, _note, sizeof limits.note);
-    BOOL useAPI = _apiAvailable && (!_fileAvailable || _apiTime >= _fileTime);
-    if (useAPI) {
+    // Only numbers that were true a moment ago: the newest source, if fresh.
+    BOOL apiFresh = _apiAvailable && now - _apiTime < kLimitsFresh;
+    BOOL fileFresh = _fileAvailable && now - _fileTime < kLimitsFresh;
+    if (apiFresh && (!fileFresh || _apiTime >= _fileTime)) {
         limits.available = YES;
         limits.fiveHour = WindowAt(_apiFiveHour, now); limits.sevenDay = WindowAt(_apiSevenDay, now);
-    } else if (_fileAvailable) {
+    } else if (fileFresh) {
         limits.available = YES;
         limits.fiveHour = WindowAt(_fileFiveHour, now); limits.sevenDay = WindowAt(_fileSevenDay, now);
-    } else if (_historyAvailable) {
-        // Placeholder until a real check lands: percentages, no reset times.
-        limits.available = YES;
-        limits.fiveHour = WindowAt(_historyFiveHour, now); limits.sevenDay = WindowAt(_historySevenDay, now);
     }
     return limits;
 }
@@ -347,7 +334,7 @@ static const double kDebounce = .8;
 
 static double OutroLength(CWActivity activity) {
     switch (activity) {
-        case CWActivityCode: return 1.0;
+        case CWActivityCode: case CWActivityServer: case CWActivityBug: case CWActivityDuck: return 1.0;
         case CWActivityCoffee: return 1.3;
         case CWActivityStretch: return 1.2;
         case CWActivityNap: case CWActivityWave: return .9;
@@ -369,7 +356,10 @@ static CWBeat HoldBeat(const CWDirector *d, double now, CGFloat width) {
     CWBeat b = {CWActivityNap, age, INFINITY, CWAnchorMin(width), 0, now, YES};
     switch (d->holding) {
         case CWLiveWorking:
-            b.activity = CWActivityCode; b.anchorX = CWAnchorMax(width); b.facingRight = NO; break;
+            // Laptop, server rack, bug and rubber duck in turn, starting at the laptop.
+            b = CWWorkBeat(fmax(0, now - d->wanderBase), width);
+            b.clock = now;
+            break;
         case CWLiveWaiting: {
             double anchor = fmax(CWAnchorMin(width), fmin(CWAnchorMax(width), d->anchorX));
             b.activity = CWActivityWave; b.anchorX = anchor;

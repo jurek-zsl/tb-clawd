@@ -17,13 +17,16 @@ extern const NSTimeInterval CWLiveSleepAfter;
 - (instancetype)initWithClaudeDirectory:(NSString *)directory;
 @property(nonatomic, copy) NSString *claudeDirectory;
 @property(nonatomic, readonly) CWLiveState state;
-// Remaining limits: the newest of a check through the Claude binary (run on
-// demand) and the optional status line bridge file, with the desktop app's
-// usage history as a placeholder.
+// Remaining limits: the newest of a check through the Claude binary and the
+// optional status line bridge file, and only while it is under five minutes
+// old. Older numbers are never shown (`available` is NO); `loading` says a
+// check is on its way.
 - (CWLimits)limitsAtDate:(NSDate *)date;
 // Fetches usage unless a fetch is running or the last one is under five
 // minutes old (two minutes after a failure). Results arrive on the main queue.
 - (void)refreshUsageIfStale;
+// A check is running.
+@property(nonatomic, readonly, getter=isFetching) BOOL fetching;
 // How limits are fetched. The default asks the Claude Code binary (see
 // ClawdLive.m); tests replace it. Call completion with usage windows
 // ({five_hour: {utilization: percent, resets_at: ...}, seven_day: ...}), or
@@ -34,9 +37,6 @@ extern const NSTimeInterval CWLiveSleepAfter;
 @property(nonatomic, copy) NSString *claudeExecutable;
 // Seconds before a slow check is stopped (default 25).
 @property(nonatomic) NSTimeInterval usageTimeout;
-// The desktop app's plan-usage-history.json, used until a real check lands.
-// nil means the standard location, but only for the standard ~/.claude.
-@property(nonatomic, copy) NSString *historyPath;
 // Why there are no numbers: "NO CLAUDE", "NO LOGIN", "FAILED", "NO LIMITS", or
 // empty. Cleared by the next successful check.
 @property(nonatomic, readonly) NSString *limitsNote;

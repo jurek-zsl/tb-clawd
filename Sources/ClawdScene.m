@@ -193,6 +193,10 @@ NSString *CWActivityName(CWActivity activity) {
         case CWActivityMad:return @"mad";
         case CWActivityWave:return @"waving";
         case CWActivityLimits:return @"limits";
+        case CWActivityDance:return @"dancing";
+        case CWActivityServer:return @"server";
+        case CWActivityBug:return @"bug";
+        case CWActivityDuck:return @"duck";
         default:return @"running";
     }
 }
@@ -211,11 +215,14 @@ double CWRunDistance(double local, double travel) {
 double CWRunDuration(CGFloat width) { return CWRunTime(CWAnchorMax(width)-CWAnchorMin(width)); }
 double CWSceneDuration(CGFloat width) { return 4*CWRunDuration(width)+34; }
 
-CWBeat CWTimelineBeat(double time, CGFloat width) {
+CWBeat CWTimelineBeat(double time, CGFloat width) { return CWTimelineBeatMusic(time,width,NO); }
+
+CWBeat CWTimelineBeatMusic(double time, CGFloat width, BOOL music) {
     width=fmax(64,width);
     CWBeat b={0};
     double run=CWRunDuration(width), duration=CWSceneDuration(width);
-    const CWActivity activities[]={CWActivityRun,CWActivityCode,CWActivityRun,CWActivityCoffee,CWActivityRun,CWActivityStretch,CWActivityRun,CWActivityNap};
+    const CWActivity activities[]={CWActivityRun,CWActivityCode,CWActivityRun,CWActivityCoffee,CWActivityRun,
+        music?CWActivityDance:CWActivityStretch,CWActivityRun,music?CWActivityDance:CWActivityNap};
     double lengths[]={run,10,run,8,run,6,run,10};
     double local=fmod(fmax(0,time),duration);
     int section=0;
@@ -229,6 +236,135 @@ CWBeat CWTimelineBeat(double time, CGFloat width) {
         b.distance=CWRunDistance(local,travel);
         b.anchorX=right?minX+b.distance:maxX-b.distance;
     } else b.anchorX=b.facingRight?minX:maxX;
+    return b;
+}
+
+// ----------------------------------------------------------------- props ---
+
+// An eighth note, 6x7.
+static void Note(CWScene *s, double x, double y) {
+    AddRect(s,x+2,y,1,6,CWInkNote,NO);
+    AddRect(s,x+3,y,2,1,CWInkNote,NO);
+    AddRect(s,x+4,y+1,1,2,CWInkNote,NO);
+    AddRect(s,x,y+5,3,2,CWInkNote,NO);
+}
+
+// A rack of three units that builds up from the floor. While it is broken
+// (before the fix) the middle unit is pulled out and blinks red; once fixed
+// every light is green.
+static const double kServerFixedAt = 7;
+static void ServerRack(CWScene *s, double rx, double bottom, int pw, int ph, double open, double local) {
+    double height=5*ph, width=7*pw, shown=round(height*open);
+    if(shown<=0) return;
+    AddRect(s,rx,bottom-shown,width,shown,CWInkLaptop,NO);
+    if(open<1) return;
+    double top=bottom-height, slot=floor((height-4)/3), unit=slot-1;
+    BOOL fixed=local>=kServerFixedAt;
+    for(int i=0;i<3;i++) {
+        double y=top+2+i*slot, pull=(i==1 && !fixed && local>1.2)?-3:0;
+        CWInk led=CWInkCode;
+        if(i==1 && !fixed) led=fmod(local,.6)<.3?CWInkLow:CWInkTrack;
+        else if(i==0 && fmod(local+.4,2.2)<.2) led=CWInkWarn;
+        AddRect(s,rx+2+pull,y,width-4,unit,CWInkScreen,NO);
+        AddRect(s,rx+3+pull,y+floor((unit-2)/2),2,2,led,NO);
+        AddRect(s,rx+7+pull,y+floor(unit/2),width-11,1,CWInkLaptop,NO);
+    }
+}
+
+// A beetle walking left, two leg frames.
+static void Bug(CWScene *s, double x, int frame) {
+    AddRect(s,x+1,23,4,3,CWInkLow,NO);
+    AddRect(s,x,24,1,2,CWInkLow,NO);
+    AddRect(s,x-1,23,1,1,CWInkLow,NO);
+    AddRect(s,x+(frame?1:2),26,1,1,CWInkLow,NO);
+    AddRect(s,x+(frame?3:4),26,1,1,CWInkLow,NO);
+}
+static void Splat(CWScene *s, double x) {
+    AddRect(s,x-1,25,8,2,CWInkLow,NO);
+    AddRect(s,x,24,1,1,CWInkLow,NO);
+    AddRect(s,x+5,24,1,1,CWInkLow,NO);
+    AddRect(s,x+2,26,1,1,CWInkEye,NO);
+}
+
+// A rubber duck facing left, 8u wide and 5u tall.
+static void Duck(CWScene *s, double x, int u, int nod) {
+    double floorY=27;
+    AddRect(s,x+u,floorY-3*u,5*u,3*u,CWInkDuck,NO);
+    AddRect(s,x+6*u,floorY-4*u,u,u,CWInkDuck,NO);
+    AddRect(s,x,floorY-5*u+nod,3*u,3*u,CWInkDuck,NO);
+    AddRect(s,x-u,floorY-4*u+nod,u,u,CWInkCoral,NO);
+    AddRect(s,x+u,floorY-4*u+nod,1,1,CWInkEye,NO);
+}
+
+// A speech bubble with up to three dots, or the idea that follows.
+static void Bubble(CWScene *s, double x, int dots) {
+    AddRect(s,x,3,15,9,CWInkText,NO);
+    AddRect(s,x,12,2,2,CWInkText,NO);
+    for(int i=0;i<dots;i++) AddRect(s,x+3+i*4,6,2,2,CWInkEye,NO);
+}
+static void Idea(CWScene *s, double x, BOOL rays) {
+    static const char *rows[7]={"..###..",".#####.",".#####.",".#####.","..###..","..###..","...#..."};
+    for(int r=0;r<7;r++) {
+        int c=0;
+        while(c<7) {
+            if(rows[r][c]!='#') {c++; continue;}
+            int start=c; while(c<7 && rows[r][c]=='#') c++;
+            AddRect(s,x+start,5+r,c-start,1,r>=5?CWInkLaptop:CWInkWarn,NO);
+        }
+    }
+    if(rays) {
+        AddRect(s,x-3,7,2,1,CWInkWarn,NO); AddRect(s,x+8,7,2,1,CWInkWarn,NO);
+        AddRect(s,x+3,2,1,2,CWInkWarn,NO);
+    }
+}
+
+// ------------------------------------------------------------ work loop ---
+
+// Four stations along the bar. Clawd starts at the laptop on the right, then
+// visits the server rack at the left end, the bug a third of the way across
+// and the rubber duck two thirds across, and runs back to the laptop.
+enum { kWorkStations = 4 };
+static void WorkStations(CGFloat width, double x[kWorkStations], CWActivity activity[kWorkStations], double length[kWorkStations], BOOL right[kWorkStations]) {
+    double minX=CWAnchorMin(width), maxX=CWAnchorMax(width), travel=maxX-minX;
+    double xs[]={maxX,minX,minX+.35*travel,minX+.7*travel};
+    CWActivity as[]={CWActivityCode,CWActivityServer,CWActivityBug,CWActivityDuck};
+    double ls[]={14,10,9,8};
+    BOOL rs[]={NO,YES,YES,YES};
+    for(int i=0;i<kWorkStations;i++) {x[i]=xs[i]; activity[i]=as[i]; length[i]=ls[i]; right[i]=rs[i];}
+}
+double CWWorkDuration(CGFloat width) {
+    width=fmax(64,width);
+    double x[kWorkStations], length[kWorkStations]; CWActivity activity[kWorkStations]; BOOL right[kWorkStations];
+    WorkStations(width,x,activity,length,right);
+    double total=0;
+    for(int i=0;i<kWorkStations;i++) total+=length[i]+CWRunTime(fabs(x[i]-x[(i+1)%kWorkStations]));
+    return total;
+}
+CWBeat CWWorkBeat(double time, CGFloat width) {
+    width=fmax(64,width);
+    double x[kWorkStations], length[kWorkStations]; CWActivity activity[kWorkStations]; BOOL right[kWorkStations];
+    WorkStations(width,x,activity,length,right);
+    double local=fmod(fmax(0,time),CWWorkDuration(width));
+    CWBeat b={0};
+    b.clock=time;
+    for(int i=0;i<kWorkStations;i++) {
+        if(local<length[i]) {
+            b.activity=activity[i]; b.age=local; b.duration=length[i];
+            b.anchorX=x[i]; b.facingRight=right[i];
+            return b;
+        }
+        local-=length[i];
+        double from=x[i], to=x[(i+1)%kWorkStations], travel=fabs(to-from), run=CWRunTime(travel);
+        if(local<run) {
+            double distance=CWRunDistance(local,travel);
+            b.activity=CWActivityRun; b.age=local; b.duration=run; b.distance=distance;
+            b.facingRight=to>from;
+            b.anchorX=b.facingRight?from+distance:from-distance;
+            return b;
+        }
+        local-=run;
+    }
+    b.activity=CWActivityCode; b.duration=length[0]; b.anchorX=x[0];
     return b;
 }
 
@@ -296,16 +432,62 @@ CWScene CWRenderBeat(CWBeat beat, CGFloat width, CWActivity reactionKind, double
             pose.left=wave==0?ArmUp:(wave==1?ArmOut:ArmDown);
             pose.right=wave==2?ArmUp:(wave==3?ArmOut:ArmDown);
         }
+    } else if(s.activity==CWActivityDance) {
+        // Music: arms and legs swap on every quarter second, hopping on the
+        // off-beats and swaying side to side, eyes shut every fourth step.
+        pose.gaze=0;
+        if(action>0) {
+            static const ArmPose lefts[8]={ArmUp,ArmOut,ArmDown,ArmOut,ArmUp,ArmLow,ArmUp,ArmOut};
+            static const ArmPose rights[8]={ArmDown,ArmOut,ArmUp,ArmOut,ArmUp,ArmLow,ArmUp,ArmOut};
+            static const int legs[8]={1,0,2,0,1,0,2,0};
+            int beat=((int)floor(local*4))&7;
+            pose.left=lefts[beat]; pose.right=rights[beat]; pose.legs=legs[beat];
+            if(beat&1) bob=-floor(ph/2.0);
+            x+=((beat>>1)&1)?pw:-pw;
+            pose.eyesClosed=(beat&3)==2;
+        }
+    } else if(s.activity==CWActivityServer) {
+        // Facing the rack: the right arm turns a wrench, then both arms go up
+        // in a hop once every light is green.
+        if(action>0) {
+            if(local<kServerFixedAt) pose.right=(((int)floor(local*4))&1)?ArmUp:ArmOut;
+            else {
+                pose.left=pose.right=ArmUp; pose.eyesClosed=YES;
+                if(((int)floor(local*4))&1) bob=-floor(ph/2.0);
+            }
+        }
+    } else if(s.activity==CWActivityBug) {
+        // A bug walks up. Clawd winds up with both arms and a frown, then
+        // lunges and stomps it flat. Two bugs per nine seconds.
+        if(action>0) {
+            double cycle=fmod(local,4.5);
+            if(cycle>=2.0 && cycle<2.5) {pose.left=pose.right=ArmUp; pose.scowl=YES;}
+            else if(cycle>=2.5 && cycle<3.2) {
+                pose.left=pose.right=ArmLow; pose.legs=2; pose.scowl=YES;
+                bob=floor(ph/2.0); x+=pw;
+            }
+        }
+    } else if(s.activity==CWActivityDuck) {
+        // Explaining the problem to a rubber duck, hands moving, until the
+        // idea lands.
+        if(action>0) {
+            if(local<5.4) pose.right=(((int)floor(local*2))&1)?ArmOut:ArmDown;
+            else {
+                pose.left=pose.right=ArmUp; pose.eyesClosed=YES;
+                if(((int)floor(local*4))&1) bob=-floor(ph/2.0);
+            }
+        }
     }
     if(!pose.eyesClosed && blink) pose.eyesClosed=YES;
 
     // Reactions: the mad tantrum (autonomous) or the limits readout (live).
     double reaction=0, shake=0;
     BOOL showLimits=NO;
-    double panelX=0, panelW=0; int fontPx=1; BOOL withReset=NO, hideActor=NO;
+    double panelX=0, panelW=0; int fontPx=1; BOOL withReset=NO, hideActor=NO, panelRight=YES;
     if(reactionAge>=0 && reactionKind==CWActivityMad && reactionAge<2.5) {
         s.activity=CWActivityMad;
         reaction=Envelope(reactionAge,2.5,.2,.4);
+        x=s.anchorX;
         // The first/last beat keeps the exact underlying silhouette.
         if(reaction<.04) reaction=0;
         if(reaction>0) {
@@ -317,9 +499,11 @@ CWScene CWRenderBeat(CWBeat beat, CGFloat width, CWActivity reactionKind, double
     } else if(reactionAge>=0 && reactionKind==CWActivityLimits && reactionAge<4) {
         s.activity=CWActivityLimits;
         showLimits=YES;
+        x=s.anchorX;
         // Put the panel on the roomier side of Clawd at the largest size that fits.
         double leftRoom=x-2, rightRoom=width-(x+spriteW)-2;
         BOOL onRight=rightRoom>=leftRoom;
+        panelRight=onRight;
         double room=fmax(leftRoom,rightRoom)-4;
         const struct {int p; BOOL reset;} sizes[]={{2,YES},{2,NO},{1,YES},{1,NO}};
         int pick=-1;
@@ -366,6 +550,24 @@ CWScene CWRenderBeat(CWBeat beat, CGFloat width, CWActivity reactionKind, double
             Spinner(&s,lx+pw+2,1,(int)floor(local/0.12));
         }
     }
+    BOOL propsUp=action>0 && !showLimits;
+    if(s.underlyingActivity==CWActivityServer && propsUp) {
+        double rx=fmin(s.anchorX+spriteW+pw+1,width-7*pw);
+        ServerRack(&s,rx,groundTop+5*ph,pw,ph,Quant(Envelope(local,s.duration,.9,1.0),3),local);
+    }
+    if(s.underlyingActivity==CWActivityBug && propsUp) {
+        // The bug crawls in from the right in eight steps, stops in front of
+        // Clawd while he winds up, and stays squashed until the next one.
+        double cycle=fmod(local,4.5), stop=s.anchorX+spriteW+2*pw;
+        double start=fmax(stop,fmin(stop+5*pw+4,width-7));
+        if(cycle<2.5) Bug(&s,start-(start-stop)*Quant(cycle/2.0,8),((int)floor(cycle*8))&1);
+        else if(cycle<4.2) Splat(&s,stop);
+    }
+    if(s.underlyingActivity==CWActivityDuck && propsUp) {
+        int u=pw>=3?2:1;
+        double duckX=fmin(s.anchorX+spriteW+3*pw+u,width-7*u-1);
+        Duck(&s,duckX,u,(local<5.4 && fmod(local,2.4)>2.0)?1:0);
+    }
     if(!hideActor) {
         Grid g={x, groundTop+bob, pw, ph};
         DrawSprite(&s, g, pose);
@@ -395,6 +597,31 @@ CWScene CWRenderBeat(CWBeat beat, CGFloat width, CWActivity reactionKind, double
         AddRect(&s,bx,4,2,9,CWInkWarn,NO);
         AddRect(&s,bx,15,2,2,CWInkWarn,NO);
     }
+    if(s.underlyingActivity==CWActivityDance && propsUp && reaction==0) {
+        // Notes drift up on both sides, two pixels at a time.
+        for(int i=0;i<2;i++) {
+            double t=local*3+i*3;
+            int step=((int)floor(t))%6;
+            double nx=i==0?fmin(width-7,x+spriteW+3+(step&1)):fmax(0,x-8-(step&1));
+            Note(&s,nx,17-step*2.5);
+        }
+    }
+    if(s.underlyingActivity==CWActivityServer && propsUp && reaction==0) {
+        // The wrench: handle from the arm tip to the rack, jaw on the bolt.
+        int turn=((int)floor(local*4))&1;
+        if(local<kServerFixedAt) {
+            double ty=groundTop+bob+(turn?0:ph)+floor(ph/2.0), jx=s.anchorX+spriteW+pw+2;
+            AddRect(&s,s.anchorX+spriteW,ty-1,pw+3,2,CWInkText,NO);
+            AddRect(&s,jx,ty-3,2,6,CWInkText,NO);
+            if(turn) {AddRect(&s,jx-3,fmax(0,ty-5),1,1,CWInkWarn,NO); AddRect(&s,jx-1,ty+4,1,1,CWInkWarn,NO);}
+        }
+    }
+    if(s.underlyingActivity==CWActivityDuck && propsUp && reaction==0) {
+        double bx=fmin(s.anchorX+spriteW+2*pw,width-16);
+        if(local<5.4) {
+            if(local>.6) Bubble(&s,bx,1+((int)floor(local*2.5))%3);
+        } else Idea(&s,fmin(bx+4,width-10),((int)floor(local*5))&1);
+    }
     if(reaction>0) {
         // A stepped puff of steam beside whichever side Clawd faces.
         double puffX=s.facingRight?fmin(width-6,x+spriteW+2):fmax(0,x-6), puffY=2+((int)floor(reactionAge*6)&1)*2;
@@ -406,11 +633,14 @@ CWScene CWRenderBeat(CWBeat beat, CGFloat width, CWActivity reactionKind, double
         int p=fontPx;
         double rowH=5*p, gap=fontPx==2?4:3, top=round((30-2*rowH-gap)/2);
         if(!l->available) {
-            // Still asking ("..." stepping in), or no data to show ("?").
+            // Still asking: three dots, one lit and raised at a time. No old
+            // numbers stand in for the real ones. Otherwise no data ("?").
             if(l->loading) {
-                char dots[4]={0}; int n=1+((int)floor(reactionAge*4))%3;
-                for(int i=0;i<n;i++) dots[i]='.';
-                Text(&s,panelX,round((30-rowH)/2),dots,p,CWInkText);
+                int lit=((int)floor(reactionAge*4))%3, size=2*p, gap=2*p;
+                double total=3*size+2*gap, dotsY=round((30-size)/2);
+                // Beside Clawd on the side the panel is on; centred when it has the strip to itself.
+                double dotsX=hideActor?panelX+round((panelW-total)/2):(panelRight?panelX+2*p:panelX+panelW-total-2*p);
+                for(int i=0;i<3;i++) AddRect(&s,dotsX+i*(size+gap),dotsY-(i==lit?p:0),size,size,i==lit?CWInkText:CWInkSteam,NO);
             } else Text(&s,panelX,round((30-rowH)/2),l->note[0]?l->note:"?",p,l->note[0]?CWInkWarn:CWInkText);
         } else {
             LimitsRow(&s,panelX,top,p,withReset,"5H",l->fiveHour);

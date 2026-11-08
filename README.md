@@ -30,6 +30,18 @@ the empty bar or his props does nothing.
 
 ![Clawd getting briefly mad when poked](docs/assets/mad.gif)
 
+**Music.** While any app is playing sound (music, a video, a call), the stretch
+and the nap in his loop turn into a dance: arms and legs swap on every beat, he
+hops and sways, and notes drift up on both sides.
+
+![Clawd dancing with music notes](docs/assets/dance.gif)
+
+The widget asks CoreAudio whether the default output device is running. That is
+one yes/no property: no permission prompt, no audio capture, nothing about what
+is playing. It is read once a second; two readings in a row start the dance and
+four silent ones end it, so the gap between tracks does not stop him. Any sound
+counts, not just music. Without sound the loop is exactly as before.
+
 ### Clawd Live: what makes each state
 
 ![Clawd Live following a Claude Code session: sleeping, coding, waving, taking a break, showing limits, sleeping again](docs/assets/live.gif)
@@ -44,7 +56,7 @@ ignored. The busiest session wins:
 | State | What triggers it | What Clawd does |
 |---|---|---|
 | **Waiting** | Any session's status is `waiting` (a permission prompt or a question for you) | Stops where he is, faces you and waves one arm, then the other, next to a blinking amber `!` |
-| **Working** | Any session's status is `busy` (generating or running tools) | Runs to the right end, opens the laptop, types with both hands while the spinner ticks |
+| **Working** | Any session's status is `busy` (generating or running tools) | Runs to the right end, opens the laptop and types while the spinner ticks, then keeps busy around the bar (see below) |
 | **Idle** | No session busy or waiting, but one finished a turn in the last 5 minutes | Packs up and wanders through his usual loop: running, coffee, stretching |
 | **Asleep** | No running session, or every session idle for over 5 minutes | Runs home to the left end and curls up to sleep, with a floating `z` |
 
@@ -54,6 +66,14 @@ make him run back and forth. Changes are acted out, never cut: he finishes the
 current action (closes the laptop, lowers the cup, wakes up), runs to where the
 next one happens, then starts it.
 
+**While Claude works** he does not sit at the laptop the whole time. He goes round
+four jobs, running between them: 14 seconds at the laptop, 10 fixing the server
+rack (a unit blinks red until his wrench fixes it and everything turns green),
+9 stomping bugs, and 8 explaining the problem to a rubber duck until the idea
+lands. When Claude stops he finishes the action he is in and moves on.
+
+![One lap of Clawd Live's work loop: laptop, server rack, bug, rubber duck](docs/assets/work.gif)
+
 ![The limits readout: 5H 63% left, resets in 2H11; 7D 18% left, resets in 3D](docs/assets/limits.png)
 
 **Tap Clawd** and he stops where he is to show the remaining 5-hour and 7-day limits for 4 seconds:
@@ -61,6 +81,16 @@ the label, a bar of what is left (green above 50%, amber above 20%, red below),
 the percentage left, and the time until that window resets. On a narrow bar the
 readout gets smaller, and below about 120 points it takes the whole strip. Tap
 again to put it away.
+
+**Only real numbers.** A reading is shown only while it is under 5 minutes old.
+If there is none, the readout shows three dots (one lit at a time) and stays open
+until the check lands, then shows the numbers for the usual 4 seconds. It never
+fills in with older figures.
+
+**Ready before you tap.** The limits are fetched when the widget appears. While
+Claude Code is running they are refreshed every 4 minutes, and again shortly
+after each finished turn, which is when they change, so a tap normally shows
+numbers at once. With no Claude Code running nothing is fetched until you tap.
 
 **Where the limits come from.** Clawd Live never touches your Keychain or your
 sign-in. On a tap it asks Claude Code itself: it runs the `claude` binary once,
@@ -71,12 +101,9 @@ non-interactively, with a one-word prompt to the cheapest model and no tools
 rate-limit headers of that one reply. Claude Code does its own sign-in and token
 renewal, so nothing expires on the widget's side.
 
-- **Cost:** one tiny request per check, roughly $0.0002 and about 3 seconds. Answers
-  are reused for 5 minutes; a failed check is retried after 2.
-- **While it runs:** the readout shows the Claude desktop app's own history
-  (`~/Library/Application Support/Claude/plan-usage-history.json`) as a
-  placeholder: percentages only, no reset times, and ignored once older than its
-  window. Real numbers replace it as soon as the check lands.
+- **Cost:** one tiny request per check, roughly $0.0002 and about 2 seconds: the
+  check stops as soon as the limits event arrives, without waiting for the reply
+  to finish. Answers are reused for 5 minutes; a failed check is retried after 2.
 - **Which binary:** `~/.local/bin/claude`, `~/.claude/local/claude`, Homebrew and
   `PATH` copies first, then the newest copy bundled inside the Claude desktop app.
 - **Your sessions:** the check is itself a brief Claude session; Clawd Live
@@ -97,7 +124,7 @@ If it can't show numbers it says why, in amber:
 The event format is part of Claude Code's streaming output, not a documented
 promise, so a Claude Code update could change it.
 
-Clawd Live makes no network requests of its own; the only traffic is the limits check that Claude Code itself performs. It reads files under `~/.claude` and the desktop app's usage history.
+Clawd Live makes no network requests of its own; the only traffic is the limits check that Claude Code itself performs. It reads files under `~/.claude`.
 
 ## Install
 
@@ -152,7 +179,8 @@ follow your real Claude Code sessions.
 ![Every pose: run, code, coffee, stretch, nap, mad, and Clawd Live waiting and working](docs/assets/actions-contact.png)
 
 A deterministic schedule alternates four journeys with coding (10 seconds),
-coffee (8 seconds), stretching (6 seconds), and napping (10 seconds). Each action
+coffee (8 seconds), stretching (6 seconds), and napping (10 seconds); with music
+playing, the stretch and the nap are dances of the same lengths. Each action
 has a setup, held main action, and recovery: opening/typing/closing the laptop,
 lifting/sipping/lowering the cup, gathering/stretching/yawning, and settling/
 breathing/waking. Props stay attached and point toward the bar interior.
@@ -176,7 +204,7 @@ To regenerate everything in `docs/assets` from the built bundles:
 The showcase uses the bundles' real renderers, with no redraws: cropping,
 nearest-neighbour scaling and captions outside the strip only. `preview.gif`
 is Clawd's full loop on a 420 point bar, `mad.gif` the tantrum close up,
-`live.gif` Clawd Live driven by scripted session files, `limits.png` the
+`dance.gif` the dance close up, `live.gif` Clawd Live driven by scripted session files, `work.gif` one lap of its work loop, `limits.png` the
 readout with sample numbers, and `actions-contact.png` every pose. GIFs are
 written with ImageIO, so no Python or Pillow is needed.
 

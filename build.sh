@@ -3,7 +3,7 @@ set -euo pipefail
 TASK_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$TASK_DIR"
 BUILD_DIR="$ROOT_DIR/build/pock"
-SOURCES=("$TASK_DIR/Sources/ClawdScene.m" "$TASK_DIR/Sources/ClawdLive.m" "$TASK_DIR/Sources/ClawdView.m" "$TASK_DIR/Sources/ClawdWidget.m")
+SOURCES=("$TASK_DIR/Sources/ClawdScene.m" "$TASK_DIR/Sources/ClawdLive.m" "$TASK_DIR/Sources/ClawdView.m" "$TASK_DIR/Sources/ClawdWidget.m" "$TASK_DIR/Sources/ClawdMusic.m")
 mkdir -p "$BUILD_DIR"
 
 # build_variant NAME BUNDLE_ID LABEL PRINCIPAL_CLASS [extra clang flags...]
@@ -16,7 +16,7 @@ build_variant() {
     for ARCH in arm64 x86_64; do
         xcrun clang -fobjc-arc -fmodules -Wall -Wextra -Wno-unused-parameter \
             -arch "$ARCH" -mmacosx-version-min=11.0 -O2 -bundle \
-            -framework AppKit -framework QuartzCore "$@" \
+            -framework AppKit -framework QuartzCore -framework CoreAudio "$@" \
             "${SOURCES[@]}" -o "$BUILD_DIR/$name-$ARCH"
     done
     xcrun lipo -create "$BUILD_DIR/$name-arm64" "$BUILD_DIR/$name-x86_64" -output "$bundle/Contents/MacOS/$name"
