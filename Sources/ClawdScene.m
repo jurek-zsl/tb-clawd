@@ -87,7 +87,8 @@ static void DrawSprite(CWScene *s, Grid g, Pose p) {
             AddRect(s, g.ox+(ex-1)*g.w, g.oy+g.h*2-half, g.w, half, CWInkEye, YES);
         } else Cell(s, g, ex, 1, 1, 1, CWInkEye, YES);
     }
-    if (p.scowl) { Cell(s, g, 4, 0, 1, 1, CWInkEye, YES); Cell(s, g, 13, 0, 1, 1, CWInkEye, YES); }
+    // Brows sit diagonally outside each eye and follow the gaze, so they never stack on an eye.
+    if (p.scowl) { Cell(s, g, 4+p.gaze, 0, 1, 1, CWInkEye, YES); Cell(s, g, 13+p.gaze, 0, 1, 1, CWInkEye, YES); }
 }
 
 // Claude Code's spinner: · ✢ ✳ ✶ ✻ ✽ then back again, one glyph every 120 ms.
@@ -478,7 +479,7 @@ CWScene CWRenderBeat(CWBeat beat, CGFloat width, CWActivity reactionKind, double
             }
         }
     }
-    if(!pose.eyesClosed && blink) pose.eyesClosed=YES;
+    if(!pose.eyesClosed && !pose.scowl && blink) pose.eyesClosed=YES;
 
     // Reactions: the mad tantrum (autonomous) or the limits readout (live).
     double reaction=0, shake=0;
